@@ -37,7 +37,7 @@ handle_client :: proc (task: thread.Task) {
     client := cast(^Client) task.data
     
     Value :: struct {
-        content: string,
+        content: [dynamic] string,
         expiration: time.Time,
     }
     store: map[string] Value
@@ -99,7 +99,10 @@ handle_client :: proc (task: thread.Task) {
                     return
                 }
                 
-                the_value := Value { content = value }
+                // @leak delete the old value if present
+                the_value: Value
+                append(&the_value.content, value)
+                
                 if request != "" {
                     line, _ = chop(&request, "\r\n")
                     optional, optional_ok := parse_bulk_string(&request, &line)
@@ -165,8 +168,32 @@ handle_client :: proc (task: thread.Task) {
                 if !value_ok {
                     send_bulk_string(client, "")
                 } else {
-                    send_bulk_string(client, value.content)
+                    send_bulk_string(client, value.content[0])
                 }
+                
+            case "RPUSH":
+                line, ok = chop(&request, "\r\n")
+                key, key_ok := parse_bulk_string(&request, &line)
+                if !key_ok {
+                    send_simple_error(client, "ERR", "missing key")
+                    return
+                }
+                
+                line, _ = chop(&request, "\r\n")
+                value, value_ok := parse_bulk_string(&request, &line)
+                if !value_ok {
+                    send_simple_error(client, "ERR", "bad value")
+                    return
+                }
+                
+                list, list_ok := &store[key]
+                if !list_ok {
+                    store[key] = {}
+                    list = &store[key]
+                }
+                append(&list.content, value)
+                
+                send_simple_integer(client, len(list.content))
                 
             case:
                 send_simple_error(client, "ERR", "unknown command")
@@ -174,6 +201,11 @@ handle_client :: proc (task: thread.Task) {
             }
         }
     }
+}
+
+send_simple_integer :: proc (client: ^Client, data: int) {
+    response := fmt.tprintf(":%v\r\n", data)
+    net.send(client.socket, transmute([] u8) response)
 }
 
 send_simple_string :: proc (client: ^Client, data: string) {
