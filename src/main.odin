@@ -86,11 +86,7 @@ handle_client :: proc (task: thread.Task) {
                 send_bulk_string(client, content)
                 
             case "SET":
-                key, key_ok := chop_line_and_parse_bulk_string(&request)
-                if !key_ok {
-                    send_simple_error(client, "ERR", "missing key")
-                    break loop
-                }
+                key := parse_key(client, &request) or_break loop
                 
                 value, value_ok := chop_line_and_parse_bulk_string(&request)
                 if !value_ok {
@@ -146,11 +142,7 @@ handle_client :: proc (task: thread.Task) {
                 send_simple_string(client, "OK")
                 
             case "GET":
-                key, key_ok := chop_line_and_parse_bulk_string(&request)
-                if !key_ok {
-                    send_simple_error(client, "ERR", "missing key")
-                    break loop
-                }
+                key := parse_key(client, &request) or_break loop
                 
                 value, value_ok := store_get(&store, key)
                 
@@ -168,11 +160,7 @@ handle_client :: proc (task: thread.Task) {
                 }
                 
             case "RPUSH":
-                key, key_ok := chop_line_and_parse_bulk_string(&request)
-                if !key_ok {
-                    send_simple_error(client, "ERR", "missing key")
-                    break loop
-                }
+                key := parse_key(client, &request) or_break loop
                 
                 list, list_ok := store_get(&store, key, or_insert = true)
                 
@@ -189,11 +177,7 @@ handle_client :: proc (task: thread.Task) {
                 send_simple_integer(client, len(list.content))
                 
             case "LPUSH":
-                key, key_ok := chop_line_and_parse_bulk_string(&request)
-                if !key_ok {
-                    send_simple_error(client, "ERR", "missing key")
-                    break loop
-                }
+                key := parse_key(client, &request) or_break loop
                 
                 list, list_ok := store_get(&store, key, or_insert = true)
                 
@@ -211,20 +195,17 @@ handle_client :: proc (task: thread.Task) {
                 send_simple_integer(client, len(list.content))
                 
             case "LLEN":
-                key, key_ok := chop_line_and_parse_bulk_string(&request)
-                if !key_ok {
-                    send_simple_error(client, "ERR", "missing key")
-                    break loop
-                }
+                key := parse_key(client, &request) or_break loop
                 
                 list, list_ok := store_get(&store, key)
                 send_simple_integer(client, list_ok ? len(list.content) : 0)
                 
             case "LPOP":
-                key, key_ok := chop_line_and_parse_bulk_string(&request)
-                if !key_ok {
-                    send_simple_error(client, "ERR", "missing key")
-                    break loop
+                key := parse_key(client, &request) or_break loop
+                
+                count := 1
+                if request != "" {
+                    count = parse_integer(client, &request) or_break loop
                 }
                 
                 list, list_ok := store_get(&store, key)
@@ -234,65 +215,30 @@ handle_client :: proc (task: thread.Task) {
                     }
                 }
                 
-                if list_ok {
-                    popped := value_pop(list)
-                    send_bulk_string(client, popped)
+                if count == 1 {
+                    if list_ok {
+                        popped := value_pop(list)
+                        send_bulk_string(client, popped)
+                    } else {
+                        send_bulk_string_nil(client)
+                    }
                 } else {
-                    send_bulk_string_nil(client)
+                    slice := value_slice(list, 0, count-1)
+                    send_array_of_bulk_string(client, slice)
+                    // @cleanup
+                    for _ in 0..<count do value_pop(list)
                 }
                 
             case "LRANGE":
-                key, key_ok := chop_line_and_parse_bulk_string(&request)
-                if !key_ok {
-                    send_simple_error(client, "ERR", "missing key")
-                    break loop
-                }
+                key := parse_key(client, &request) or_break loop
                 
-                start, start_ok := chop_line_and_parse_bulk_string(&request)
-                ss, ss_ok := strconv.parse_int(start)
-                if !start_ok || !ss_ok {
-                    send_simple_error(client, "ERR", "missing start")
-                    break loop
-                }
+                start := parse_integer(client, &request) or_break loop
+                stop  := parse_integer(client, &request) or_break loop
                 
-                end, end_ok := chop_line_and_parse_bulk_string(&request)
-                ee, ee_ok := strconv.parse_int(end)
-                if !end_ok || !ee_ok {
-                    send_simple_error(client, "ERR", "missing end")
-                    break loop
-                }
+                list, _ := store_get(&store, key)
+                slice := value_slice(list, start, stop)
                 
-                list, list_ok := store_get(&store, key)
-                if list_ok {
-                    count := len(list.content)
-                    if ss < 0 {
-                        if ss < -count {
-                            ss = 0 
-                        } else {
-                            ss = ((ss % count) + count) % count
-                        }
-                    }
-                    
-                    if ee < 0 {
-                        ee = ((ee % count) + count) % count
-                    } else if ee > count {
-                        ee = count-1
-                    }
-                }
-                    
-                if ss > ee {
-                    list_ok = false
-                }
-                
-                if list_ok && ss >= len(list.content) {
-                    list_ok = false
-                }
-                
-                if !list_ok {
-                    send_array_nil(client)
-                } else {
-                    send_array_of_bulk_string(client, list.content[ss:ee+1])
-                }
+                send_array_of_bulk_string(client, slice)
                 
             case:
                 send_simple_error(client, "ERR", "unknown command")
@@ -356,6 +302,44 @@ store_get :: proc (store: ^Store, key: string, or_insert := false, replace_previ
 
 ////////////////////////////////////////////////
 
+value_slice :: proc (value: ^Value, start, stop: int) -> [] string {
+    start, stop := start, stop
+    
+    list_ok := value != nil
+    if list_ok {
+        count := len(value.content)
+        if start < 0 {
+            if start < -count {
+                start = 0 
+            } else {
+                start = ((start % count) + count) % count
+            }
+        }
+        
+        if stop < 0 {
+            stop = ((stop % count) + count) % count
+        } else if stop > count {
+            stop = count-1
+        }
+    }
+        
+    if start > stop {
+        list_ok = false
+    }
+    
+    if list_ok && start >= len(value.content) {
+        list_ok = false
+    }
+    
+    result: [] string
+    if list_ok {
+        result = value.content[start:stop+1]
+    }
+    return result
+}
+
+////////////////////////////////////////////////
+
 send_simple_integer :: proc (client: ^Client, data: int) {
     response := fmt.tprintf(":%v\r\n", data)
     send(client, response)
@@ -378,14 +362,18 @@ send_array_nil :: proc (client: ^Client) {
 }
 
 send_array_of_bulk_string :: proc (client: ^Client, array: [] string) {
-    response := strings.builder_make(context.temp_allocator)
-    fmt.sbprintf(&response, "*%v\r\n", len(array))
-    for value in array {
-        // @copypasta of format
-        fmt.sbprintf(&response, "$%v\r\n%v\r\n", len(value), value)
+    if array == nil {
+        send_array_nil(client)
+    } else {
+        response := strings.builder_make(context.temp_allocator)
+        fmt.sbprintf(&response, "*%v\r\n", len(array))
+        for value in array {
+            // @copypasta of format
+            fmt.sbprintf(&response, "$%v\r\n%v\r\n", len(value), value)
+        }
+        
+        send(client, strings.to_string(response))
     }
-    
-    send(client, strings.to_string(response))
 }
 
 send_bulk_string_nil :: proc (client: ^Client) {
@@ -405,6 +393,25 @@ send :: proc (client: ^Client, data: string) {
 }
 
 ////////////////////////////////////////////////
+
+parse_key :: proc (client: ^Client, request: ^string) -> (string, bool) {
+    key, key_ok := chop_line_and_parse_bulk_string(request)
+    if !key_ok {
+        send_simple_error(client, "ERR", "missing key")
+    }
+    return key, key_ok
+}
+
+parse_integer :: proc (client: ^Client, request: ^string) -> (int, bool) {
+    text, text_ok := chop_line_and_parse_bulk_string(request)
+    
+    result, ok := strconv.parse_int(text)
+    if !text_ok || !ok {
+        ok = false
+        send_simple_error(client, "ERR", "bad number")
+    }
+    return result, ok
+}
 
 chop_line_and_parse_bulk_string :: proc (request: ^string) -> (string, bool) {
     line, line_ok := chop(request, "\r\n")
