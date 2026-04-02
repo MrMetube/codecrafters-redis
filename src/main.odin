@@ -220,6 +220,27 @@ handle_client :: proc (task: thread.Task) {
                 list, list_ok := store_get(&store, key)
                 send_simple_integer(client, list_ok ? len(list.content) : 0)
                 
+            case "LPOP":
+                key, key_ok := chop_line_and_parse_bulk_string(&request)
+                if !key_ok {
+                    send_simple_error(client, "ERR", "missing key")
+                    break loop
+                }
+                
+                list, list_ok := store_get(&store, key)
+                if list_ok {
+                    if len(list.content) == 0 {
+                        list_ok = false
+                    }
+                }
+                
+                if list_ok {
+                    popped := value_pop(list)
+                    send_bulk_string(client, popped)
+                } else {
+                    send_bulk_string_nil(client)
+                }
+                
             case "LRANGE":
                 key, key_ok := chop_line_and_parse_bulk_string(&request)
                 if !key_ok {
@@ -296,6 +317,11 @@ value_append :: proc (value: ^Value, s: string) {
 value_prepend :: proc (value: ^Value, s: string) {
     s := clone_string(s, context.allocator)
     inject_at(&value.content, 0, s)
+}
+
+value_pop :: proc (value: ^Value) -> string {
+    result := pop_front(&value.content)
+    return result
 }
 
 store_get :: proc (store: ^Store, key: string, or_insert := false, replace_previous := false) -> (^Value, bool) {
