@@ -76,7 +76,7 @@ handle_client :: proc (task: thread.Task) {
                 send_bulk_string(client, content)
                 
             case:
-                send_simple_error(client, "Unknown Command", "closing connection")
+                send_simple_error(client, "ERR", "unknown command")
                 return
             }
         }
