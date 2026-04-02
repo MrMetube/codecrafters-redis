@@ -174,9 +174,7 @@ handle_client :: proc (task: thread.Task) {
                     break loop
                 }
                 
-                fmt.eprintln(key)
                 list, list_ok := store_get(&store, key, or_insert = true)
-                fmt.eprintln(store)
                 
                 for request != "" {
                     value, value_ok := chop_line_and_parse_bulk_string(&request)
@@ -212,21 +210,32 @@ handle_client :: proc (task: thread.Task) {
                 }
                 
                 list, list_ok := store_get(&store, key)
-                if !list_ok {
-                    fmt.eprintln(store)
+                if list_ok {
+                    count := len(list.content)
+                    if ss < 0 {
+                        if ss < -count {
+                            ss = 0 
+                        } else {
+                            ss = ((ss % count) + count) % count
+                        }
+                    }
+                    
+                    if ee < 0 {
+                        ee = ((ee % count) + count) % count
+                    } else if ee > count {
+                        ee = count-1
+                    }
+                }
+                    
+                if ss > ee {
+                    list_ok = false
                 }
                 
-                if list_ok && ee < 0 do ee = len(list.content) + ee
-                if list_ok && ss < 0 do ss = len(list.content) + ss
-                
-                if list_ok && ss >= len(list.content) || ss > ee {
+                if list_ok && ss >= len(list.content) {
                     list_ok = false
                 }
                 
                 ee += 1
-                if list_ok && ee > len(list.content) {
-                    ee = len(list.content)
-                }
                 
                 if !list_ok {
                     send_array_nil(client)
