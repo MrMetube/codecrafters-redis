@@ -94,7 +94,13 @@ handle_client :: proc (task: thread.Task) {
                 send_simple_string(client, "OK")
                 
             case "GET":
-                key := line
+                line, ok = chop(&request, "\r\n")
+                key, key_ok := parse_bulk_string(&request, &line)
+                if !key_ok {
+                    send_simple_error(client, "ERR", "missing key")
+                    return
+                }
+                
                 value, value_ok := store[key]
                 if !value_ok {
                     send_simple_string(client, "")
