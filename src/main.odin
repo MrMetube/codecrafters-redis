@@ -76,8 +76,8 @@ handle_client :: proc (task: thread.Task) {
                 send_bulk_string(client, content)
                 
             case:
-                // @todo(viktor): bad request
-                net.close(client.socket)
+                send_simple_error(client, "Unknown Command", "closing connection")
+                return
             }
         }
     }
@@ -86,6 +86,12 @@ handle_client :: proc (task: thread.Task) {
 send_simple_string :: proc (client: ^Client, data: string) {
     response := fmt.tprintf("+%v\r\n", data)
     net.send(client.socket, transmute([] u8) response)
+}
+
+send_simple_error :: proc (client: ^Client, error: string, message: string) {
+    response := fmt.tprintf("-%v %v\r\n", error, message)
+    net.send(client.socket, transmute([] u8) response)
+    net.close(client.socket)
 }
 
 send_bulk_string :: proc (client: ^Client, data: string) {
