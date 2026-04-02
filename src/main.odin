@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:net"
 import "core:strings"
+import "core:strconv"
 import "core:bytes"
 
 main :: proc (){
@@ -21,5 +22,48 @@ main :: proc (){
     if accept_err != nil {
         fmt.panicf("%s", accept_err)
     }
+    
+    buffer: [256] u8
+    bytes_read, receive_err := net.recv(client_socket, buffer[:])
+    if receive_err != nil {
+        fmt.panicf("%s", receive_err)
+    }
+    
+    text := transmute(string) buffer[:bytes_read]
+    count: u64
+    if text[0] == '*' {
+        text = text[1:]
+        line := chop(&text, "\r\n")
+        ok: bool
+        count, ok = strconv.parse_u64(line)
+        assert(ok)
+    }
+    
+    for i in 0..<count {
+        length: u64
+        if text[0] == '$' {
+            text = text[1:]
+            line := chop(&text, "\r\n")
+            ok: bool
+            length, ok = strconv.parse_u64(line)
+            assert(ok)
+        }
+        
+        
+        message := text[:length]
+        if message == "PING" {
+            response := "+PONG\r\n"
+            net.send(client_socket, transmute([] u8) response)
+        } else {
+            // @todo(viktor): bad request
+            net.close(client_socket)
+        }
+    }
 }
 
+
+chop :: proc (s: ^string, until: string) -> string {
+    head, match, tail := strings.partition(s^, until)
+    s^ = tail
+    return head
+}
