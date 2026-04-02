@@ -188,6 +188,28 @@ handle_client :: proc (task: thread.Task) {
                 
                 send_simple_integer(client, len(list.content))
                 
+            case "LPUSH":
+                key, key_ok := chop_line_and_parse_bulk_string(&request)
+                if !key_ok {
+                    send_simple_error(client, "ERR", "missing key")
+                    break loop
+                }
+                
+                list, list_ok := store_get(&store, key, or_insert = true)
+                
+                for request != "" {
+                    value, value_ok := chop_line_and_parse_bulk_string(&request)
+                    if !value_ok {
+                        send_simple_error(client, "ERR", "bad value")
+                        break loop
+                    }
+                    
+                    // @speed collect then prepend once to avoid multiple copies
+                    value_prepend(list, value)
+                }
+                
+                send_simple_integer(client, len(list.content))
+                
             case "LRANGE":
                 key, key_ok := chop_line_and_parse_bulk_string(&request)
                 if !key_ok {
@@ -235,12 +257,10 @@ handle_client :: proc (task: thread.Task) {
                     list_ok = false
                 }
                 
-                ee += 1
-                
                 if !list_ok {
                     send_array_nil(client)
                 } else {
-                    send_array_of_bulk_string(client, list.content[ss:ee])
+                    send_array_of_bulk_string(client, list.content[ss:ee+1])
                 }
                 
             case:
@@ -261,6 +281,11 @@ clone_string :: proc (s: string, allocator := context.allocator) -> string {
 value_append :: proc (value: ^Value, s: string) {
     s := clone_string(s, context.allocator)
     append(&value.content, s)
+}
+
+value_prepend :: proc (value: ^Value, s: string) {
+    s := clone_string(s, context.allocator)
+    inject_at(&value.content, 0, s)
 }
 
 store_get :: proc (store: ^Store, key: string, or_insert := false, replace_previous := false) -> (^Value, bool) {
