@@ -77,23 +77,19 @@ handle_client :: proc (task: thread.Task) {
                 send_simple_string(client, "PONG")
                 
             case "ECHO":
-                line, ok := chop(&request, "\r\n")
-                assert(ok)
-                content, content_ok := parse_bulk_string(&request, &line)
+                content, content_ok := chop_line_and_parse_bulk_string(&request)
                 assert(content_ok)
                 
                 send_bulk_string(client, content)
                 
             case "SET":
-                line, _ = chop(&request, "\r\n")
-                key, key_ok := parse_bulk_string(&request, &line)
+                key, key_ok := chop_line_and_parse_bulk_string(&request)
                 if !key_ok {
                     send_simple_error(client, "ERR", "missing key")
                     return
                 }
                 
-                line, _ = chop(&request, "\r\n")
-                value, value_ok := parse_bulk_string(&request, &line)
+                value, value_ok := chop_line_and_parse_bulk_string(&request)
                 if !value_ok {
                     send_simple_error(client, "ERR", "bad value")
                     return
@@ -104,8 +100,7 @@ handle_client :: proc (task: thread.Task) {
                 append(&the_value.content, value)
                 
                 if request != "" {
-                    line, _ = chop(&request, "\r\n")
-                    optional, optional_ok := parse_bulk_string(&request, &line)
+                    optional, optional_ok := chop_line_and_parse_bulk_string(&request)
                     if !optional_ok {
                         send_simple_error(client, "ERR", "bad optional")
                         return
@@ -114,8 +109,7 @@ handle_client :: proc (task: thread.Task) {
                     optional = strings.to_upper(optional)
                     switch optional {
                     case "EX":
-                        line, _ = chop(&request, "\r\n")
-                        seconds, seconds_ok := parse_bulk_string(&request, &line)
+                        seconds, seconds_ok := chop_line_and_parse_bulk_string(&request)
                         if !seconds_ok {
                             send_simple_error(client, "ERR", "bad optional")
                             return
@@ -127,8 +121,7 @@ handle_client :: proc (task: thread.Task) {
                         the_value.expiration = time.time_add(time.now(), time.Second * cast(time.Duration) secs)
                     
                     case "PX":
-                        line, _ = chop(&request, "\r\n")
-                        milliseconds, milliseconds_ok := parse_bulk_string(&request, &line)
+                        milliseconds, milliseconds_ok := chop_line_and_parse_bulk_string(&request)
                         if !milliseconds_ok {
                             send_simple_error(client, "ERR", "bad optional")
                             return
@@ -149,8 +142,7 @@ handle_client :: proc (task: thread.Task) {
                 send_simple_string(client, "OK")
                 
             case "GET":
-                line, ok = chop(&request, "\r\n")
-                key, key_ok := parse_bulk_string(&request, &line)
+                key, key_ok := chop_line_and_parse_bulk_string(&request)
                 if !key_ok {
                     send_simple_error(client, "ERR", "missing key")
                     return
@@ -172,15 +164,13 @@ handle_client :: proc (task: thread.Task) {
                 }
                 
             case "RPUSH":
-                line, ok = chop(&request, "\r\n")
-                key, key_ok := parse_bulk_string(&request, &line)
+                key, key_ok := chop_line_and_parse_bulk_string(&request)
                 if !key_ok {
                     send_simple_error(client, "ERR", "missing key")
                     return
                 }
                 
-                line, _ = chop(&request, "\r\n")
-                value, value_ok := parse_bulk_string(&request, &line)
+                value, value_ok := chop_line_and_parse_bulk_string(&request)
                 if !value_ok {
                     send_simple_error(client, "ERR", "bad value")
                     return
@@ -225,6 +215,17 @@ send_bulk_string :: proc (client: ^Client, data: string) {
         response = fmt.tprintf("$%v\r\n%v\r\n", len(data), data)
     }
     net.send(client.socket, transmute([] u8) response)
+}
+
+////////////////////////////////////////////////
+
+
+chop_line_and_parse_bulk_string :: proc (request: ^string) -> (string, bool) {
+    line, line_ok := chop(request, "\r\n")
+    if !line_ok do return "", false
+    
+    result, ok := parse_bulk_string(request, &line)
+    return result, ok
 }
 
 parse_bulk_string :: proc (request: ^string, line: ^string) -> (string, bool) {
