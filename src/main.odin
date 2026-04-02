@@ -58,7 +58,6 @@ handle_client :: proc (task: thread.Task) {
         for i in 0..<count {
             line, ok := chop(&request, "\r\n")
             if !ok do break
-            
             command, command_ok := parse_bulk_string(&request, &line)
             assert(command_ok)
             
