@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:net"
 import "core:strings"
 import "core:thread"
+import "core:time"
 import "core:strconv"
 
 Client :: struct{
@@ -35,13 +36,22 @@ main :: proc (){
 handle_client :: proc (task: thread.Task) {
     client := cast(^Client) task.data
     
-    store: map[string] string
+    Value :: struct {
+        content: string,
+        expiration: time.Time,
+    }
+    store: map[string] Value
     
     buffer: [256] u8
     for {
         bytes_read, receive_err := net.recv(client.socket, buffer[:])
         if receive_err != nil {
             fmt.panicf("%s", receive_err)
+        }
+        
+        if bytes_read == 0 {
+            send_simple_error(client, "ERR", "Empty request")
+            return
         }
         
         request := transmute(string) buffer[:bytes_read]
@@ -75,21 +85,64 @@ handle_client :: proc (task: thread.Task) {
                 send_bulk_string(client, content)
                 
             case "SET":
-                line, ok = chop(&request, "\r\n")
+                line, _ = chop(&request, "\r\n")
                 key, key_ok := parse_bulk_string(&request, &line)
                 if !key_ok {
                     send_simple_error(client, "ERR", "missing key")
                     return
                 }
                 
-                line, ok = chop(&request, "\r\n")
+                line, _ = chop(&request, "\r\n")
                 value, value_ok := parse_bulk_string(&request, &line)
                 if !value_ok {
                     send_simple_error(client, "ERR", "bad value")
                     return
                 }
                 
-                store[key] = value
+                the_value := Value { content = value }
+                if request != "" {
+                    line, _ = chop(&request, "\r\n")
+                    optional, optional_ok := parse_bulk_string(&request, &line)
+                    if !optional_ok {
+                        send_simple_error(client, "ERR", "bad optional")
+                        return
+                    }
+                    
+                    optional = strings.to_upper(optional)
+                    switch optional {
+                    case "EX":
+                        line, _ = chop(&request, "\r\n")
+                        seconds, seconds_ok := parse_bulk_string(&request, &line)
+                        if !seconds_ok {
+                            send_simple_error(client, "ERR", "bad optional")
+                            return
+                        }
+                        
+                        secs, secs_ok := strconv.parse_u64(seconds)
+                        assert(secs_ok)
+                        
+                        the_value.expiration = time.time_add(time.now(), time.Second * cast(time.Duration) secs)
+                    
+                    case "PX":
+                        line, _ = chop(&request, "\r\n")
+                        milliseconds, milliseconds_ok := parse_bulk_string(&request, &line)
+                        if !milliseconds_ok {
+                            send_simple_error(client, "ERR", "bad optional")
+                            return
+                        }
+                        
+                        millis, millis_ok := strconv.parse_u64(milliseconds)
+                        assert(millis_ok)
+                        
+                        the_value.expiration = time.time_add(time.now(), time.Millisecond * cast(time.Duration) millis)
+                        
+                    case:
+                        send_simple_error(client, "ERR", "unknown optional")
+                        return
+                    }
+                }
+                
+                store[key] = the_value
                 send_simple_string(client, "OK")
                 
             case "GET":
@@ -101,10 +154,18 @@ handle_client :: proc (task: thread.Task) {
                 }
                 
                 value, value_ok := store[key]
+                
+                if value.expiration != {} {
+                    time_left := time.diff(time.now(), value.expiration)
+                    if time_left <= 0 {
+                        value_ok = false
+                    }
+                }
+                
                 if !value_ok {
-                    send_simple_string(client, "")
+                    send_bulk_string(client, "")
                 } else {
-                    send_bulk_string(client, value)
+                    send_bulk_string(client, value.content)
                 }
                 
             case:
