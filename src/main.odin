@@ -3,16 +3,41 @@ package main
 import "core:fmt"
 import "core:net"
 import "core:strings"
+import "core:thread"
 import "core:strconv"
 
+Client :: struct{
+    socket: net.TCP_Socket,
+}
+
 main :: proc (){
-    // fmt.eprintln("Logs from your program will appear here!")
+    pool: thread.Pool
+    thread.pool_init(&pool, context.allocator, 11)
+    thread.pool_start(&pool)
     
-    client_socket := listen_and_accept()
+    listen_socket, listen_err := net.listen_tcp(net.Endpoint{ port = 6379, address = net.IP4_Loopback })
+    if listen_err != nil {
+        fmt.panicf("%s", listen_err)
+    }
+    
+    for {
+        client_socket, client_endpoint, accept_err := net.accept_tcp(listen_socket)
+        if accept_err != nil {
+            fmt.panicf("%s", accept_err)
+        }
+        
+        client := new(Client)
+        client.socket = client_socket
+        thread.pool_add_task(&pool, context.allocator, handle_client, client)
+    }
+}
+
+handle_client :: proc (task: thread.Task) {
+    client := cast(^Client) task.data
     
     buffer: [256] u8
     for {
-        bytes_read, receive_err := net.recv(client_socket, buffer[:])
+        bytes_read, receive_err := net.recv(client.socket, buffer[:])
         if receive_err != nil {
             fmt.panicf("%s", receive_err)
         }
@@ -43,27 +68,13 @@ main :: proc (){
             message  = message[:length]
             if message == "PING" {
                 response := "+PONG\r\n"
-                net.send(client_socket, transmute([] u8) response)
+                net.send(client.socket, transmute([] u8) response)
             } else {
                 // @todo(viktor): bad request
-                net.close(client_socket)
+                net.close(client.socket)
             }
         }
     }
-}
-
-listen_and_accept :: proc () -> net.TCP_Socket {
-    listen_socket, listen_err := net.listen_tcp(net.Endpoint{ port = 6379, address = net.IP4_Loopback })
-    if listen_err != nil {
-        fmt.panicf("%s", listen_err)
-    }
-    
-    client_socket, client_endpoint, accept_err := net.accept_tcp(listen_socket)
-    if accept_err != nil {
-        fmt.panicf("%s", accept_err)
-    }
-    
-    return client_socket
 }
 
 chop :: proc (s: ^string, until: string) -> string {
