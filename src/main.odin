@@ -170,18 +170,21 @@ handle_client :: proc (task: thread.Task) {
                     return
                 }
                 
-                value, value_ok := chop_line_and_parse_bulk_string(&request)
-                if !value_ok {
-                    send_simple_error(client, "ERR", "bad value")
-                    return
-                }
-                
                 list, list_ok := &store[key]
                 if !list_ok {
                     store[key] = {}
                     list = &store[key]
                 }
-                append(&list.content, value)
+                
+                for request != "" {
+                    value, value_ok := chop_line_and_parse_bulk_string(&request)
+                    if !value_ok {
+                        send_simple_error(client, "ERR", "bad value")
+                        return
+                    }
+                
+                    append(&list.content, value)
+                }
                 
                 send_simple_integer(client, len(list.content))
                 
