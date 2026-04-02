@@ -35,6 +35,8 @@ main :: proc (){
 handle_client :: proc (task: thread.Task) {
     client := cast(^Client) task.data
     
+    store: map[string] string
+    
     buffer: [256] u8
     for {
         bytes_read, receive_err := net.recv(client.socket, buffer[:])
@@ -56,11 +58,9 @@ handle_client :: proc (task: thread.Task) {
         for i in 0..<count {
             line, ok := chop(&request, "\r\n")
             if !ok do break
-            fmt.eprintf("remaining `%v`\n", request)
             
             command, command_ok := parse_bulk_string(&request, &line)
             assert(command_ok)
-            fmt.eprintf("remaining `%v`\n", request)
             
             command = strings.to_upper(command, context.temp_allocator)
             switch command {
@@ -74,6 +74,26 @@ handle_client :: proc (task: thread.Task) {
                 assert(content_ok)
                 
                 send_bulk_string(client, content)
+                
+            case "SET":
+                key, key_ok := chop(&line, " ")
+                if !key_ok {
+                    send_simple_error(client, "ERR", "missing key")
+                    return
+                }
+                
+                value := line
+                store[key] = value
+                send_simple_string(client, "OK")
+                
+            case "GET":
+                key := line
+                value, value_ok := store[key]
+                if !value_ok {
+                    send_simple_string(client, "")
+                } else {
+                    send_bulk_string(client, value)
+                }
                 
             case:
                 send_simple_error(client, "ERR", "unknown command")
@@ -95,7 +115,10 @@ send_simple_error :: proc (client: ^Client, error: string, message: string) {
 }
 
 send_bulk_string :: proc (client: ^Client, data: string) {
-    response := fmt.tprintf("$%v\r\n%v\r\n", len(data), data)
+    response := "$-1\r\n"
+    if data != "" {
+        response = fmt.tprintf("$%v\r\n%v\r\n", len(data), data)
+    }
     net.send(client.socket, transmute([] u8) response)
 }
 
