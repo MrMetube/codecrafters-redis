@@ -33,17 +33,20 @@ main :: proc (){
     }
 }
 
+Store :: map[string] Value
+
+Value :: struct {
+    content: [dynamic] string,
+    expiration: time.Time,
+}
+
 handle_client :: proc (task: thread.Task) {
     client := cast(^Client) task.data
     
-    Value :: struct {
-        content: [dynamic] string,
-        expiration: time.Time,
-    }
-    store: map[string] Value
+    store: Store
     
     buffer: [256] u8
-    for {
+    loop: for {
         bytes_read, receive_err := net.recv(client.socket, buffer[:])
         if receive_err != nil {
             fmt.panicf("%s", receive_err)
@@ -51,7 +54,7 @@ handle_client :: proc (task: thread.Task) {
         
         if bytes_read == 0 {
             send_simple_error(client, "ERR", "Empty request")
-            return
+            break loop
         }
         
         request := transmute(string) buffer[:bytes_read]
@@ -86,24 +89,21 @@ handle_client :: proc (task: thread.Task) {
                 key, key_ok := chop_line_and_parse_bulk_string(&request)
                 if !key_ok {
                     send_simple_error(client, "ERR", "missing key")
-                    return
+                    break loop
                 }
                 
                 value, value_ok := chop_line_and_parse_bulk_string(&request)
                 if !value_ok {
                     send_simple_error(client, "ERR", "bad value")
-                    return
+                    break loop
                 }
                 
-                // @leak delete the old value if present
-                the_value: Value
-                append(&the_value.content, value)
-                
+                expiration: time.Time
                 if request != "" {
                     optional, optional_ok := chop_line_and_parse_bulk_string(&request)
                     if !optional_ok {
                         send_simple_error(client, "ERR", "bad optional")
-                        return
+                        break loop
                     }
                     
                     optional = strings.to_upper(optional)
@@ -112,43 +112,47 @@ handle_client :: proc (task: thread.Task) {
                         seconds, seconds_ok := chop_line_and_parse_bulk_string(&request)
                         if !seconds_ok {
                             send_simple_error(client, "ERR", "bad optional")
-                            return
+                            break loop
                         }
                         
                         secs, secs_ok := strconv.parse_u64(seconds)
                         assert(secs_ok)
                         
-                        the_value.expiration = time.time_add(time.now(), time.Second * cast(time.Duration) secs)
+                        expiration = time.time_add(time.now(), time.Second * cast(time.Duration) secs)
                     
                     case "PX":
                         milliseconds, milliseconds_ok := chop_line_and_parse_bulk_string(&request)
                         if !milliseconds_ok {
                             send_simple_error(client, "ERR", "bad optional")
-                            return
+                            break loop
                         }
                         
                         millis, millis_ok := strconv.parse_u64(milliseconds)
                         assert(millis_ok)
                         
-                        the_value.expiration = time.time_add(time.now(), time.Millisecond * cast(time.Duration) millis)
+                        expiration = time.time_add(time.now(), time.Millisecond * cast(time.Duration) millis)
                         
                     case:
                         send_simple_error(client, "ERR", "unknown optional")
-                        return
+                        break loop
                     }
                 }
                 
-                store[key] = the_value
+                the_value, _ := store_get(&store, key, replace_previous = true)
+                fmt.eprintln(the_value, key, expiration)
+                value_append(the_value, value)
+                the_value.expiration = expiration
+                
                 send_simple_string(client, "OK")
                 
             case "GET":
                 key, key_ok := chop_line_and_parse_bulk_string(&request)
                 if !key_ok {
                     send_simple_error(client, "ERR", "missing key")
-                    return
+                    break loop
                 }
                 
-                value, value_ok := store[key]
+                value, value_ok := store_get(&store, key)
                 
                 if value.expiration != {} {
                     time_left := time.diff(time.now(), value.expiration)
@@ -167,23 +171,21 @@ handle_client :: proc (task: thread.Task) {
                 key, key_ok := chop_line_and_parse_bulk_string(&request)
                 if !key_ok {
                     send_simple_error(client, "ERR", "missing key")
-                    return
+                    break loop
                 }
                 
-                list, list_ok := &store[key]
-                if !list_ok {
-                    store[key] = {}
-                    list = &store[key]
-                }
+                fmt.eprintln(key)
+                list, list_ok := store_get(&store, key, or_insert = true)
+                fmt.eprintln(store)
                 
                 for request != "" {
                     value, value_ok := chop_line_and_parse_bulk_string(&request)
                     if !value_ok {
                         send_simple_error(client, "ERR", "bad value")
-                        return
+                        break loop
                     }
                 
-                    append(&list.content, value)
+                    value_append(list, value)
                 }
                 
                 send_simple_integer(client, len(list.content))
@@ -192,23 +194,97 @@ handle_client :: proc (task: thread.Task) {
                 key, key_ok := chop_line_and_parse_bulk_string(&request)
                 if !key_ok {
                     send_simple_error(client, "ERR", "missing key")
-                    return
+                    break loop
                 }
                 
-                list, list_ok := &store[key]
+                start, start_ok := chop_line_and_parse_bulk_string(&request)
+                ss, ss_ok := strconv.parse_int(start)
+                if !start_ok || !ss_ok {
+                    send_simple_error(client, "ERR", "missing start")
+                    break loop
+                }
+                
+                end, end_ok := chop_line_and_parse_bulk_string(&request)
+                ee, ee_ok := strconv.parse_int(end)
+                if !end_ok || !ee_ok {
+                    send_simple_error(client, "ERR", "missing end")
+                    break loop
+                }
+                
+                list, list_ok := store_get(&store, key)
+                if !list_ok {
+                    fmt.eprintln(store)
+                }
+                
+                if list_ok && ee < 0 do ee = len(list.content) + ee
+                if list_ok && ss < 0 do ss = len(list.content) + ss
+                
+                if list_ok && ss >= len(list.content) || ss > ee {
+                    list_ok = false
+                }
+                
+                ee += 1
+                if list_ok && ee > len(list.content) {
+                    ee = len(list.content)
+                }
+                
                 if !list_ok {
                     send_array_nil(client)
                 } else {
-                    send_array_of_bulk_string(client, list.content[:])
+                    send_array_of_bulk_string(client, list.content[ss:ee])
                 }
                 
             case:
                 send_simple_error(client, "ERR", "unknown command")
-                return
+                break loop
             }
         }
     }
 }
+
+clone_string :: proc (s: string, allocator := context.allocator) -> string {
+    bytes := make([] u8, len(s), allocator)
+    copy(bytes, s)
+    result := transmute(string) bytes
+    return result
+}
+
+value_append :: proc (value: ^Value, s: string) {
+    s := clone_string(s, context.allocator)
+    append(&value.content, s)
+}
+
+store_get :: proc (store: ^Store, key: string, or_insert := false, replace_previous := false) -> (^Value, bool) {
+    key := clone_string(key)
+    value, value_ok := &store[key]
+    
+    make_new := false
+    if replace_previous {
+        if value_ok do free(value)
+        make_new = true
+    }
+    if or_insert && !value_ok {
+        make_new = true
+    }
+    
+    if make_new {
+        store[key] = {}
+        value, value_ok = &store[key]
+    }
+    
+    if value_ok {
+        if value.expiration != {} {
+            time_left := time.diff(time.now(), value.expiration)
+            if time_left <= 0 {
+                value_ok = false
+            }
+        }
+    }
+    
+    return value, value_ok
+}
+
+////////////////////////////////////////////////
 
 send_simple_integer :: proc (client: ^Client, data: int) {
     response := fmt.tprintf(":%v\r\n", data)
@@ -236,7 +312,7 @@ send_array_of_bulk_string :: proc (client: ^Client, array: [] string) {
     fmt.sbprintf(&response, "*%v\r\n", len(array))
     for value in array {
         // @copypasta of format
-        fmt.sbprintf(&response, "$%v\r\n%v\r\n", value)
+        fmt.sbprintf(&response, "$%v\r\n%v\r\n", len(value), value)
     }
     
     send(client, strings.to_string(response))
