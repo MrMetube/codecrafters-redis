@@ -158,7 +158,7 @@ handle_client :: proc (task: thread.Task) {
                 }
                 
                 if !value_ok {
-                    send_bulk_string(client, "")
+                    send_bulk_string_nil(client)
                 } else {
                     send_bulk_string(client, value.content[0])
                 }
@@ -188,6 +188,20 @@ handle_client :: proc (task: thread.Task) {
                 
                 send_simple_integer(client, len(list.content))
                 
+            case "LRANGE":
+                key, key_ok := chop_line_and_parse_bulk_string(&request)
+                if !key_ok {
+                    send_simple_error(client, "ERR", "missing key")
+                    return
+                }
+                
+                list, list_ok := &store[key]
+                if !list_ok {
+                    send_array_nil(client)
+                } else {
+                    send_array_of_bulk_string(client, list.content[:])
+                }
+                
             case:
                 send_simple_error(client, "ERR", "unknown command")
                 return
@@ -198,30 +212,53 @@ handle_client :: proc (task: thread.Task) {
 
 send_simple_integer :: proc (client: ^Client, data: int) {
     response := fmt.tprintf(":%v\r\n", data)
-    net.send(client.socket, transmute([] u8) response)
+    send(client, response)
 }
 
 send_simple_string :: proc (client: ^Client, data: string) {
     response := fmt.tprintf("+%v\r\n", data)
-    net.send(client.socket, transmute([] u8) response)
+    send(client, response)
 }
 
 send_simple_error :: proc (client: ^Client, error: string, message: string) {
     response := fmt.tprintf("-%v %v\r\n", error, message)
-    net.send(client.socket, transmute([] u8) response)
+    send(client, response)
     net.close(client.socket)
 }
 
-send_bulk_string :: proc (client: ^Client, data: string) {
-    response := "$-1\r\n"
-    if data != "" {
-        response = fmt.tprintf("$%v\r\n%v\r\n", len(data), data)
+send_array_nil :: proc (client: ^Client) {
+    response := "*0\r\n"
+    send(client, response)
+}
+
+send_array_of_bulk_string :: proc (client: ^Client, array: [] string) {
+    response := strings.builder_make(context.temp_allocator)
+    fmt.sbprintf(&response, "*%v\r\n", len(array))
+    for value in array {
+        // @copypasta of format
+        fmt.sbprintf(&response, "$%v\r\n%v\r\n", value)
     }
-    net.send(client.socket, transmute([] u8) response)
+    
+    send(client, strings.to_string(response))
+}
+
+send_bulk_string_nil :: proc (client: ^Client) {
+    response := "$-1\r\n"
+    send(client, response)
+}
+
+send_bulk_string :: proc (client: ^Client, data: string) {
+    response := fmt.tprintf("$%v\r\n%v\r\n", len(data), data)
+    send(client, response)
 }
 
 ////////////////////////////////////////////////
 
+send :: proc (client: ^Client, data: string) {
+    net.send(client.socket, transmute([] u8) data)
+}
+
+////////////////////////////////////////////////
 
 chop_line_and_parse_bulk_string :: proc (request: ^string) -> (string, bool) {
     line, line_ok := chop(request, "\r\n")
