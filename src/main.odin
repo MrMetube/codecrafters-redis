@@ -11,39 +11,43 @@ main :: proc (){
     client_socket := listen_and_accept()
     
     buffer: [256] u8
-    bytes_read, receive_err := net.recv(client_socket, buffer[:])
-    if receive_err != nil {
-        fmt.panicf("%s", receive_err)
-    }
-    
-    text := transmute(string) buffer[:bytes_read]
-    count: u64
-    if text[0] == '*' {
-        text = text[1:]
+    for {
+        bytes_read, receive_err := net.recv(client_socket, buffer[:])
+        if receive_err != nil {
+            fmt.panicf("%s", receive_err)
+        }
+        
+        text := transmute(string) buffer[:bytes_read]
         line := chop(&text, "\r\n")
-        ok: bool
-        count, ok = strconv.parse_u64(line)
-        assert(ok)
-    }
-    
-    for i in 0..<count {
-        length: u64
-        if text[0] == '$' {
-            text = text[1:]
-            line := chop(&text, "\r\n")
+        count: u64
+        if line[0] == '*' {
+            line = line[1:]
             ok: bool
-            length, ok = strconv.parse_u64(line)
+            count, ok = strconv.parse_u64(line)
             assert(ok)
         }
         
-        
-        message := text[:length]
-        if message == "PING" {
-            response := "+PONG\r\n"
-            net.send(client_socket, transmute([] u8) response)
-        } else {
-            // @todo(viktor): bad request
-            net.close(client_socket)
+        for i in 0..<count {
+            line := chop(&text, "\r\n")
+            fmt.eprintf("remaining `%v`\n", text)
+            length: u64
+            if line[0] == '$' {
+                line = line[1:]
+                ok: bool
+                length, ok = strconv.parse_u64(line)
+                assert(ok)
+            }
+            
+            message := chop(&text, "\r\n")
+            fmt.eprintf("remaining `%v`\n", text)
+            message  = message[:length]
+            if message == "PING" {
+                response := "+PONG\r\n"
+                net.send(client_socket, transmute([] u8) response)
+            } else {
+                // @todo(viktor): bad request
+                net.close(client_socket)
+            }
         }
     }
 }
