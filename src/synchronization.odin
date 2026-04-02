@@ -3,6 +3,7 @@
 package main
 
 import "base:intrinsics"
+import "core:fmt"
 
 ////////////////////////////////////////////////
 // Acquire:    Nothing after this, can be done until this is completed.
@@ -47,10 +48,20 @@ TicketMutex :: struct #align(64) {
 }
 
 begin_ticket_mutex :: proc (mutex: ^TicketMutex) {
-    ticket := atomic_add(&mutex.ticket, 1)
-    for ticket != volatile_load(&mutex.serving) {
+    ticket := ticket_mutex_take_ticket(mutex)
+    for !ticket_mutex_ticket_is_ready(mutex, ticket) {
         spin_hint()
     }
+}
+
+ticket_mutex_take_ticket :: proc (mutex: ^TicketMutex) -> u64 {
+    result := atomic_add(&mutex.ticket, 1)
+    return result
+}
+
+ticket_mutex_ticket_is_ready :: proc (mutex: ^TicketMutex, ticket: u64) -> bool {
+    result := ticket == volatile_load(&mutex.serving)
+    return result
 }
 
 end_ticket_mutex :: proc (mutex: ^TicketMutex) {
