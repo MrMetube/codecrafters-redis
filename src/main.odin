@@ -76,13 +76,20 @@ handle_client :: proc (task: thread.Task) {
                 send_bulk_string(client, content)
                 
             case "SET":
-                key, key_ok := chop(&line, " ")
+                line, ok = chop(&request, "\r\n")
+                key, key_ok := parse_bulk_string(&request, &line)
                 if !key_ok {
                     send_simple_error(client, "ERR", "missing key")
                     return
                 }
                 
-                value := line
+                line, ok = chop(&request, "\r\n")
+                value, value_ok := parse_bulk_string(&request, &line)
+                if !value_ok {
+                    send_simple_error(client, "ERR", "bad value")
+                    return
+                }
+                
                 store[key] = value
                 send_simple_string(client, "OK")
                 
