@@ -62,7 +62,7 @@ handle_client :: proc (task: thread.Task) {
             assert(command_ok)
             fmt.eprintf("remaining `%v`\n", request)
             
-            // @todo(viktor): case insensitive
+            command = strings.to_upper(command, context.temp_allocator)
             switch command {
             case "PING":
                 send_simple_string(client, "PONG")
