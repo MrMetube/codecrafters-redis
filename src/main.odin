@@ -210,6 +210,16 @@ handle_client :: proc (task: thread.Task) {
                 
                 send_simple_integer(client, len(list.content))
                 
+            case "LLEN":
+                key, key_ok := chop_line_and_parse_bulk_string(&request)
+                if !key_ok {
+                    send_simple_error(client, "ERR", "missing key")
+                    break loop
+                }
+                
+                list, list_ok := store_get(&store, key)
+                send_simple_integer(client, list_ok ? len(list.content) : 0)
+                
             case "LRANGE":
                 key, key_ok := chop_line_and_parse_bulk_string(&request)
                 if !key_ok {
