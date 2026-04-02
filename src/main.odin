@@ -4,24 +4,11 @@ import "core:fmt"
 import "core:net"
 import "core:strings"
 import "core:strconv"
-import "core:bytes"
 
 main :: proc (){
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    fmt.eprintln("Logs from your program will appear here!")
-
-    // Uncomment the code below to pass the first stage
-    listen_socket, listen_err := net.listen_tcp(net.Endpoint{
-        port = 6379,
-        address = net.IP4_Loopback
-    })
-    if listen_err != nil {
-        fmt.panicf("%s", listen_err)
-    }
-    client_socket, client_endpoint, accept_err := net.accept_tcp(listen_socket)
-    if accept_err != nil {
-        fmt.panicf("%s", accept_err)
-    }
+    // fmt.eprintln("Logs from your program will appear here!")
+    
+    client_socket := listen_and_accept()
     
     buffer: [256] u8
     bytes_read, receive_err := net.recv(client_socket, buffer[:])
@@ -61,6 +48,19 @@ main :: proc (){
     }
 }
 
+listen_and_accept :: proc () -> net.TCP_Socket {
+    listen_socket, listen_err := net.listen_tcp(net.Endpoint{ port = 6379, address = net.IP4_Loopback })
+    if listen_err != nil {
+        fmt.panicf("%s", listen_err)
+    }
+    
+    client_socket, client_endpoint, accept_err := net.accept_tcp(listen_socket)
+    if accept_err != nil {
+        fmt.panicf("%s", accept_err)
+    }
+    
+    return client_socket
+}
 
 chop :: proc (s: ^string, until: string) -> string {
     head, match, tail := strings.partition(s^, until)
