@@ -52,6 +52,21 @@ Value :: struct {
     // list
     content_waiting_room: TicketMutex,
     content: [dynamic] string,
+    
+    // stream
+    entries: [dynamic] Stream_Entry,
+    entries_kv: [dynamic] Stream_Key_Value,
+}
+
+Stream_Entry :: struct {
+    id: string,
+    kv_start: int,
+    kv_count: int,
+}
+
+Stream_Key_Value :: struct {
+    key:   string,
+    value: string,
 }
 
 main :: proc (){
@@ -102,7 +117,6 @@ handle_client :: proc (task: thread.Task) {
             send(client)
             return
         }
-        
         
         client.request = transmute(string) buffer[:bytes_read]
         fmt.eprintf("full request \n`````\n%v`````\n", client.request)
@@ -326,6 +340,32 @@ handle_client :: proc (task: thread.Task) {
                 write_array_of_bulk_string(client, {key, popped})
             }
             
+        case "XADD":
+            key := parse_key(client) or_break handle
+            
+            stream, _ := store_get(client.store, key, .Stream, or_insert = true)
+            
+            id, ok := chop_line_and_parse_bulk_string(&client.request)
+            assert(ok)
+            
+            entry := stream_begin_entry(stream, id)
+            
+            item_key: string
+            item_value: string
+            item_key, ok = chop_line_and_parse_bulk_string(&client.request)
+            assert(ok)
+            item_value, ok = chop_line_and_parse_bulk_string(&client.request)
+            assert(ok)
+            stream_add_item(stream, entry, item_key, item_value)
+            for client.request != "" {
+                item_key,   _ = chop_line_and_parse_bulk_string(&client.request)
+                item_value, _ = chop_line_and_parse_bulk_string(&client.request)
+                stream_add_item(stream, entry, item_key, item_value)
+            }
+            stream_end_entry(stream, entry)
+            
+            write_bulk_string(client, entry.id)
+            
         case:
             write_simple_error(client, "ERR", "unknown command")
         }
@@ -402,6 +442,71 @@ value_len :: proc (value: ^Value, loc := #caller_location) -> int {
     return result
 }
 
+value_slice :: proc (value: ^Value, start, stop: int, loc := #caller_location) -> [] string {
+    assert(value.kind == .List, loc = loc)
+    
+    start, stop := start, stop
+    
+    list_ok := value != nil
+    if list_ok {
+        count := len(value.content)
+        if start < 0 {
+            if start < -count {
+                start = 0 
+            } else {
+                start = ((start % count) + count) % count
+            }
+        }
+        
+        if stop < 0 {
+            stop = ((stop % count) + count) % count
+        } else if stop > count {
+            stop = count-1
+        }
+    }
+        
+    if start > stop {
+        list_ok = false
+    }
+    
+    if list_ok && start >= len(value.content) {
+        list_ok = false
+    }
+    
+    result: [] string
+    if list_ok {
+        result = value.content[start:stop+1]
+    }
+    return result
+}
+
+////////////////////////////////////////////////
+
+// @todo(viktor): should the stream be locked by a mutex for the whole operation?
+stream_begin_entry :: proc (stream: ^Value, id: string, loc := #caller_location) -> ^Stream_Entry {
+    assert(stream.kind == .Stream, loc = loc)
+    
+    count := len(stream.entries)
+    append_nothing(&stream.entries)
+    entry := &stream.entries[count]
+    entry.id = id
+    entry.kv_start = len(stream.entries_kv)
+    return entry
+}
+
+stream_add_item :: proc (stream: ^Value, entry: ^Stream_Entry, key, value: string, loc := #caller_location) {
+    assert(stream.kind == .Stream, loc = loc)
+    
+    append(&stream.entries_kv, Stream_Key_Value{key, value})
+    entry.kv_count += 1
+}
+
+stream_end_entry :: proc (stream: ^Value, entry: ^Stream_Entry, loc := #caller_location) {
+    assert(stream.kind == .Stream, loc = loc)
+}
+
+////////////////////////////////////////////////
+
 store_type :: proc (store: ^Store, key: string) -> Value_Kind {
     begin_ticket_mutex(&store.mutex)
     value, value_ok := &store.db[key]
@@ -455,46 +560,6 @@ store_get :: proc (store: ^Store, key: string, kind: Value_Kind, or_insert := fa
     }
     
     return value, value_ok
-}
-
-////////////////////////////////////////////////
-
-value_slice :: proc (value: ^Value, start, stop: int, loc := #caller_location) -> [] string {
-    assert(value.kind == .List, loc = loc)
-    
-    start, stop := start, stop
-    
-    list_ok := value != nil
-    if list_ok {
-        count := len(value.content)
-        if start < 0 {
-            if start < -count {
-                start = 0 
-            } else {
-                start = ((start % count) + count) % count
-            }
-        }
-        
-        if stop < 0 {
-            stop = ((stop % count) + count) % count
-        } else if stop > count {
-            stop = count-1
-        }
-    }
-        
-    if start > stop {
-        list_ok = false
-    }
-    
-    if list_ok && start >= len(value.content) {
-        list_ok = false
-    }
-    
-    result: [] string
-    if list_ok {
-        result = value.content[start:stop+1]
-    }
-    return result
 }
 
 ////////////////////////////////////////////////
