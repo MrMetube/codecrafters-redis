@@ -8,7 +8,20 @@ import "core:time"
 import "core:strconv"
 
 Client :: struct{
-    socket: net.TCP_Socket,
+    store:   ^Store,
+    socket:  net.TCP_Socket,
+    request: string,
+}
+
+Store :: struct {
+    db: map[string] Value,
+    mutex: TicketMutex,
+}
+    
+
+Value :: struct {
+    content: [dynamic] string,
+    expiration: time.Time,
 }
 
 main :: proc (){
@@ -21,6 +34,8 @@ main :: proc (){
         fmt.panicf("%s", listen_err)
     }
     
+    store: Store
+    
     for {
         client_socket, client_endpoint, accept_err := net.accept_tcp(listen_socket)
         if accept_err != nil {
@@ -29,27 +44,21 @@ main :: proc (){
         
         client := new(Client)
         client.socket = client_socket
+        client.store = &store
         thread.pool_add_task(&pool, context.allocator, handle_client, client)
     }
-}
-
-Store :: map[string] Value
-
-Value :: struct {
-    content: [dynamic] string,
-    expiration: time.Time,
 }
 
 handle_client :: proc (task: thread.Task) {
     client := cast(^Client) task.data
     
-    store: Store
-    
     buffer: [256] u8
     loop: for {
         bytes_read, receive_err := net.recv(client.socket, buffer[:])
         if receive_err != nil {
-            fmt.panicf("%s", receive_err)
+            fmt.eprintf("%s", receive_err)
+            net.close(client.socket)
+            break loop
         }
         
         if bytes_read == 0 {
@@ -57,9 +66,9 @@ handle_client :: proc (task: thread.Task) {
             break loop
         }
         
-        request := transmute(string) buffer[:bytes_read]
-        fmt.eprintf("full request `%v`\n", request)
-        line, _ := chop(&request, "\r\n")
+        client.request = transmute(string) buffer[:bytes_read]
+        fmt.eprintf("full request `%v`\n", client.request)
+        line, _ := chop(&client.request, "\r\n")
         count: u64
         if line[0] == '*' {
             line = line[1:]
@@ -69,9 +78,9 @@ handle_client :: proc (task: thread.Task) {
         }
         
         for i in 0..<count {
-            line, ok := chop(&request, "\r\n")
+            line, ok := chop(&client.request, "\r\n")
             if !ok do break
-            command, command_ok := parse_bulk_string(&request, &line)
+            command, command_ok := parse_bulk_string(&client.request, &line)
             assert(command_ok)
             
             command = strings.to_upper(command, context.temp_allocator)
@@ -80,23 +89,23 @@ handle_client :: proc (task: thread.Task) {
                 send_simple_string(client, "PONG")
                 
             case "ECHO":
-                content, content_ok := chop_line_and_parse_bulk_string(&request)
+                content, content_ok := chop_line_and_parse_bulk_string(&client.request)
                 assert(content_ok)
                 
                 send_bulk_string(client, content)
                 
             case "SET":
-                key := parse_key(client, &request) or_break loop
+                key := parse_key(client) or_break loop
                 
-                value, value_ok := chop_line_and_parse_bulk_string(&request)
+                value, value_ok := chop_line_and_parse_bulk_string(&client.request)
                 if !value_ok {
                     send_simple_error(client, "ERR", "bad value")
                     break loop
                 }
                 
                 expiration: time.Time
-                if request != "" {
-                    optional, optional_ok := chop_line_and_parse_bulk_string(&request)
+                if client.request != "" {
+                    optional, optional_ok := chop_line_and_parse_bulk_string(&client.request)
                     if !optional_ok {
                         send_simple_error(client, "ERR", "bad optional")
                         break loop
@@ -105,7 +114,7 @@ handle_client :: proc (task: thread.Task) {
                     optional = strings.to_upper(optional)
                     switch optional {
                     case "EX":
-                        seconds, seconds_ok := chop_line_and_parse_bulk_string(&request)
+                        seconds, seconds_ok := chop_line_and_parse_bulk_string(&client.request)
                         if !seconds_ok {
                             send_simple_error(client, "ERR", "bad optional")
                             break loop
@@ -117,7 +126,7 @@ handle_client :: proc (task: thread.Task) {
                         expiration = time.time_add(time.now(), time.Second * cast(time.Duration) secs)
                     
                     case "PX":
-                        milliseconds, milliseconds_ok := chop_line_and_parse_bulk_string(&request)
+                        milliseconds, milliseconds_ok := chop_line_and_parse_bulk_string(&client.request)
                         if !milliseconds_ok {
                             send_simple_error(client, "ERR", "bad optional")
                             break loop
@@ -134,7 +143,7 @@ handle_client :: proc (task: thread.Task) {
                     }
                 }
                 
-                the_value, _ := store_get(&store, key, replace_previous = true)
+                the_value, _ := store_get(client.store, key, replace_previous = true)
                 fmt.eprintln(the_value, key, expiration)
                 value_append(the_value, value)
                 the_value.expiration = expiration
@@ -142,9 +151,9 @@ handle_client :: proc (task: thread.Task) {
                 send_simple_string(client, "OK")
                 
             case "GET":
-                key := parse_key(client, &request) or_break loop
+                key := parse_key(client) or_break loop
                 
-                value, value_ok := store_get(&store, key)
+                value, value_ok := store_get(client.store, key)
                 
                 if value.expiration != {} {
                     time_left := time.diff(time.now(), value.expiration)
@@ -160,12 +169,12 @@ handle_client :: proc (task: thread.Task) {
                 }
                 
             case "RPUSH":
-                key := parse_key(client, &request) or_break loop
+                key := parse_key(client) or_break loop
                 
-                list, list_ok := store_get(&store, key, or_insert = true)
+                list, list_ok := store_get(client.store, key, or_insert = true)
                 
-                for request != "" {
-                    value, value_ok := chop_line_and_parse_bulk_string(&request)
+                for client.request != "" {
+                    value, value_ok := chop_line_and_parse_bulk_string(&client.request)
                     if !value_ok {
                         send_simple_error(client, "ERR", "bad value")
                         break loop
@@ -177,12 +186,12 @@ handle_client :: proc (task: thread.Task) {
                 send_simple_integer(client, len(list.content))
                 
             case "LPUSH":
-                key := parse_key(client, &request) or_break loop
+                key := parse_key(client) or_break loop
                 
-                list, list_ok := store_get(&store, key, or_insert = true)
+                list, list_ok := store_get(client.store, key, or_insert = true)
                 
-                for request != "" {
-                    value, value_ok := chop_line_and_parse_bulk_string(&request)
+                for client.request != "" {
+                    value, value_ok := chop_line_and_parse_bulk_string(&client.request)
                     if !value_ok {
                         send_simple_error(client, "ERR", "bad value")
                         break loop
@@ -195,20 +204,31 @@ handle_client :: proc (task: thread.Task) {
                 send_simple_integer(client, len(list.content))
                 
             case "LLEN":
-                key := parse_key(client, &request) or_break loop
+                key := parse_key(client) or_break loop
                 
-                list, list_ok := store_get(&store, key)
+                list, list_ok := store_get(client.store, key)
                 send_simple_integer(client, list_ok ? len(list.content) : 0)
                 
+            case "LRANGE":
+                key := parse_key(client) or_break loop
+                
+                start := parse_integer(client) or_break loop
+                stop  := parse_integer(client) or_break loop
+                
+                list, _ := store_get(client.store, key)
+                slice := value_slice(list, start, stop)
+                
+                send_array_of_bulk_string(client, slice)
+                
             case "LPOP":
-                key := parse_key(client, &request) or_break loop
+                key := parse_key(client) or_break loop
                 
                 count := 1
-                if request != "" {
-                    count = parse_integer(client, &request) or_break loop
+                if client.request != "" {
+                    count = parse_integer(client) or_break loop
                 }
                 
-                list, list_ok := store_get(&store, key)
+                list, list_ok := store_get(client.store, key)
                 if list_ok {
                     if len(list.content) == 0 {
                         list_ok = false
@@ -229,16 +249,35 @@ handle_client :: proc (task: thread.Task) {
                     for _ in 0..<count do value_pop(list)
                 }
                 
-            case "LRANGE":
-                key := parse_key(client, &request) or_break loop
+            case "BLPOP":
+                key := parse_key(client) or_break loop
                 
-                start := parse_integer(client, &request) or_break loop
-                stop  := parse_integer(client, &request) or_break loop
+                timeout := max(time.Duration)
+                if client.request != "" {
+                    timeout_number := parse_integer(client) or_break loop
+                    if timeout_number != 0 {
+                        timeout = time.Second * cast(time.Duration) timeout_number
+                    }
+                }
                 
-                list, _ := store_get(&store, key)
-                slice := value_slice(list, start, stop)
+                list, _ := store_get(client.store, key, or_insert = true)
+                timed_out := false
+                block: for start := time.now(); len(list.content) == 0; {
+                    if time.since(start) > timeout {
+                        fmt.eprintln("OVER")
+                        timed_out = true
+                        break block
+                    }
+                }
                 
-                send_array_of_bulk_string(client, slice)
+                if timed_out {
+                    fmt.eprintln("TIME OUT")
+                    send_array_nil(client)
+                } else {
+                    popped := value_pop(list)
+                    fmt.eprintln("ok", []string{key, popped})
+                    send_array_of_bulk_string(client, {key, popped})
+                }
                 
             case:
                 send_simple_error(client, "ERR", "unknown command")
@@ -272,7 +311,10 @@ value_pop :: proc (value: ^Value) -> string {
 
 store_get :: proc (store: ^Store, key: string, or_insert := false, replace_previous := false) -> (^Value, bool) {
     key := clone_string(key)
-    value, value_ok := &store[key]
+    
+    begin_ticket_mutex(&store.mutex)
+    value, value_ok := &store.db[key]
+    end_ticket_mutex(&store.mutex)
     
     make_new := false
     if replace_previous {
@@ -284,8 +326,10 @@ store_get :: proc (store: ^Store, key: string, or_insert := false, replace_previ
     }
     
     if make_new {
-        store[key] = {}
-        value, value_ok = &store[key]
+        begin_ticket_mutex(&store.mutex)
+        store.db[key] = {}
+        value, value_ok = &store.db[key]
+        end_ticket_mutex(&store.mutex)
     }
     
     if value_ok {
@@ -394,16 +438,16 @@ send :: proc (client: ^Client, data: string) {
 
 ////////////////////////////////////////////////
 
-parse_key :: proc (client: ^Client, request: ^string) -> (string, bool) {
-    key, key_ok := chop_line_and_parse_bulk_string(request)
+parse_key :: proc (client: ^Client) -> (string, bool) {
+    key, key_ok := chop_line_and_parse_bulk_string(&client.request)
     if !key_ok {
         send_simple_error(client, "ERR", "missing key")
     }
     return key, key_ok
 }
 
-parse_integer :: proc (client: ^Client, request: ^string) -> (int, bool) {
-    text, text_ok := chop_line_and_parse_bulk_string(request)
+parse_integer :: proc (client: ^Client) -> (int, bool) {
+    text, text_ok := chop_line_and_parse_bulk_string(&client.request)
     
     result, ok := strconv.parse_int(text)
     if !text_ok || !ok {
