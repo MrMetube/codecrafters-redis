@@ -10,16 +10,16 @@ main :: proc (){
     fmt.eprintln("Logs from your program will appear here!")
 
     // Uncomment the code below to pass the first stage
-    // listen_socket, listen_err := net.listen_tcp(net.Endpoint{
-    //     port = 6379,
-    //     address = net.IP4_Loopback
-    // })
-    // if listen_err != nil {
-    //     fmt.panicf("%s", listen_err)
-    // }
-    // client_socket, client_endpoint, accept_err := net.accept_tcp(listen_socket)
-    // if accept_err != nil {
-    //     fmt.panicf("%s", accept_err)
-    // }
+    listen_socket, listen_err := net.listen_tcp(net.Endpoint{
+        port = 6379,
+        address = net.IP4_Loopback
+    })
+    if listen_err != nil {
+        fmt.panicf("%s", listen_err)
+    }
+    client_socket, client_endpoint, accept_err := net.accept_tcp(listen_socket)
+    if accept_err != nil {
+        fmt.panicf("%s", accept_err)
+    }
 }
 
