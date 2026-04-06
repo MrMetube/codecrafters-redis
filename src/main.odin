@@ -350,14 +350,14 @@ handle_client :: proc (task: thread.Task) {
             }
             
             start_id, start_id_ok := chop_bulk_string(&client.request)
-            stop_id, stop_id_ok  := chop_bulk_string(&client.request)
+            stop_id,  stop_id_ok  := chop_bulk_string(&client.request)
             if !start_id_ok || !stop_id_ok {
                 write_simple_error(client, "ERR", "bad start stop")
                 break handle
             }
             
-            start, start_ok := parse_id(start_id, 0)
-            stop, stop_ok   := parse_id(stop_id,  max(int))
+            start, start_ok := parse_id_or_first_id(stream, start_id, 0)
+            stop,  stop_ok  := parse_id(stop_id, max(int))
             if !start_ok || !stop_ok {
                 write_simple_error(client, "ERR", "bad id")
                 break handle
@@ -370,7 +370,7 @@ handle_client :: proc (task: thread.Task) {
                         entry_start = entry_index
                     }
                 } else {
-                    if entry.id.millis > stop.millis && entry.id.sequence > stop.sequence {
+                    if entry.id.millis > stop.millis || entry.id.sequence > stop.sequence {
                         entry_stop = entry_index
                         break find
                     }
@@ -695,6 +695,23 @@ parse_key :: proc (client: ^Client) -> (string, bool) {
         write_simple_error(client, "ERR", "missing key")
     }
     return key, key_ok
+}
+
+parse_id_or_first_id :: proc (stream: ^Value, id: string, default_sequence := -1) -> (Stream_Id, bool) {
+    assert(stream.kind == .Stream)
+
+    result: Stream_Id
+    ok: bool
+    if id == "-" {
+        if len(stream.entries) > 0 {
+            result = stream.entries[0].id
+            ok = true
+        }
+    } else {
+        result, ok = parse_id(id, default_sequence)
+    }
+    
+    return result, ok
 }
 
 parse_id :: proc (id: string, default_sequence := -1) -> (Stream_Id, bool) {
