@@ -445,16 +445,25 @@ set_add :: proc (set: ^Value, score: f32, value: string, loc := #caller_location
     inject_index := 0
     // @speed binary search?
     search: for it_score, score_index in set.members_score {
+        it_content := set.items[score_index]
+        if it_content == value && it_score < score {
+            inject_index = -1
+            break search
+        }
         if it_score > score {
             inject_index = score_index
             break search
         }
     }
     
-    inject_at(&set.items,         inject_index, value)
-    inject_at(&set.members_score, inject_index, score)
+    result: int
+    if inject_index >= 0 {
+        inject_at(&set.items,         inject_index, value)
+        inject_at(&set.members_score, inject_index, score)
+        result += 1
+    }
     
-    return 1
+    return result
 }
 
 clone_string :: proc (s: string, allocator := context.allocator) -> string {
