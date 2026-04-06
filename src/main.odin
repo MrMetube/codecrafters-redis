@@ -318,7 +318,7 @@ handle_client :: proc (task: thread.Task) {
             entry, entry_error := stream_begin_entry(stream, id)
             if entry_error == .none {
                 for {
-                    item_key   := expect_bulk_string(client, "bad entry key") or_break handle
+                    item_key   := expect_bulk_string(client, "bad entry key")   or_break handle
                     item_value := expect_bulk_string(client, "bad entry value") or_break handle
                     stream_add_item(stream, entry, item_key, item_value)
                     if client.request == "" do break
@@ -500,22 +500,22 @@ stream_begin_entry :: proc (stream: ^Value, id: string, loc := #caller_location)
             error = .id_too_smol
         }
         
-        if sequence == -1 {
-            sequence = last.id_sequence + 1
-        } else {
-            if milliseconds == last.id_millis {
+        if milliseconds == last.id_millis {
+            if sequence == -1 {
+                sequence = last.id_sequence + 1
+            } else {
                 if sequence <= last.id_sequence {
                     error = .id_too_smol
                 }
             }
         }
-    } else {
-        if sequence == -1 {
-            if milliseconds == 0 {
-                sequence = 1
-            } else {
-                sequence = 0
-            }
+    }
+    
+    if sequence == -1 {
+        if milliseconds == 0 {
+            sequence = 1
+        } else {
+            sequence = 0
         }
     }
     
