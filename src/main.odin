@@ -565,7 +565,11 @@ handle_client :: proc (task: thread.Task) {
         
         switch state {
         case .Transaction:
-            write_simple_string(client, "OK")
+            if command == "MULTI" {
+                write_simple_string(client, "OK")
+            } else {
+                write_simple_string(client, "QUEUED")
+            }
             
         case .Execute:
             state = .Immediate
