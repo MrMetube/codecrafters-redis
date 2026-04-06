@@ -59,7 +59,7 @@ Value :: struct {
     entries: [dynamic] Stream_Entry,
     
     // sorted set
-    members_score:   [dynamic] f32,
+    members_score:   [dynamic] f64,
 }
 
 main :: proc () {
@@ -160,19 +160,19 @@ handle_client :: proc (task: thread.Task) {
                 optional := expect_bulk_string(client, "bad optional") or_break handle
                 optional = strings.to_upper(optional)
                 
+                factor: time.Duration
                 switch optional {
-                case "EX":
-                    seconds := parse_float(client) or_break handle
-                    expiration = time.time_add(time.now(), cast(time.Duration) (cast(f32) time.Second * seconds))
-                
-                case "PX":
-                    milliseconds := parse_float(client) or_break handle
-                    expiration = time.time_add(time.now(), cast(time.Duration) (cast(f32) time.Millisecond * milliseconds))
+                case "EX": factor = time.Second
+                case "PX": factor = time.Millisecond
                     
                 case:
                     write_simple_error(client, "ERR", "unknown optional")
                     break handle
                 }
+                
+                time_amount := parse_float(client) or_break handle
+                duration    := cast(time.Duration) (cast(f64) factor * time_amount)
+                expiration   = time.time_add(time.now(), duration)
             }
             
             the_value, _ := store_get(client.store, key, .String, replace_previous = true)
@@ -275,7 +275,7 @@ handle_client :: proc (task: thread.Task) {
             if client.request != "" {
                 timeout_number := parse_float(client) or_break handle
                 if timeout_number != 0 {
-                    timeout = cast(time.Duration) (cast(f32) time.Second * timeout_number)
+                    timeout = cast(time.Duration) (cast(f64) time.Second * timeout_number)
                 }
             }
             
@@ -497,7 +497,7 @@ handle_client :: proc (task: thread.Task) {
 
 ////////////////////////////////////////////////
 
-zset_add :: proc (set: ^Value, score: f32, value: string, loc := #caller_location) -> int {
+zset_add :: proc (set: ^Value, score: f64, value: string, loc := #caller_location) -> int {
     assert(set.kind == .ZSet, loc = loc)
     
     // @speed hash lookup
@@ -563,7 +563,7 @@ zset_rank :: proc (set: ^Value, value: string, loc := #caller_location) -> (int,
     return result, ok
 }
 
-zset_score :: proc (set: ^Value, value: string, loc := #caller_location) -> (f32, bool) {
+zset_score :: proc (set: ^Value, value: string, loc := #caller_location) -> (f64, bool) {
     assert(set.kind == .ZSet, loc = loc)
     
     index, ok := zset_rank(set, value, loc)
@@ -719,7 +719,7 @@ write_simple_integer :: proc (client: ^Client, data: int) {
     fmt.sbprintf(&client.response, ":%v\r\n", data)
 }
 
-write_simple_float :: proc (client: ^Client, data: f32) {
+write_simple_float :: proc (client: ^Client, data: f64) {
     write_bulk_string(client, fmt.tprintf("%.*f", math.MAX_F32_PRECISION, data))
 }
 
@@ -869,10 +869,10 @@ parse_integer :: proc (client: ^Client) -> (int, bool) {
     return result, ok
 }
 
-parse_float :: proc (client: ^Client) -> (f32, bool) {
+parse_float :: proc (client: ^Client) -> (f64, bool) {
     text, text_ok := chop_bulk_string(client)
     
-    result, ok := strconv.parse_f32(text)
+    result, ok := strconv.parse_f64(text)
     if !text_ok || !ok {
         ok = false
         write_simple_error(client, "ERR", "bad number")
