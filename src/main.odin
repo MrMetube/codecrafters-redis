@@ -210,7 +210,7 @@ handle_client :: proc (task: thread.Task) {
                 value_set(value, fmt.aprint(number, context.allocator))
                 write_simple_integer(client, number)
             } else {
-                
+                write_simple_error(client, "ERR", "value is not an integer or out of range")
             }
             
         ////////////////////////////////////////////////
