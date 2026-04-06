@@ -134,8 +134,14 @@ handle_client :: proc (task: thread.Task) {
     defer net.close(client.socket)
     
     buffer: [2048] u8
-    inside_multi: bool
-    did_exec: bool
+    
+    State:: enum {
+        Immediate,
+        Transaction,
+        Execute,
+    }
+    state: State
+    
     commands: [dynamic] Command
     for {
         bytes_read, receive_err := net.recv(client.socket, buffer[:])
@@ -235,14 +241,13 @@ handle_client :: proc (task: thread.Task) {
         ////////////////////////////////////////////////
         
         case "MULTI":
-            inside_multi = true
+            state = .Transaction
             
         case "EXEC":
-            if inside_multi {
-                inside_multi = false
-                did_exec = true
-            } else {
-                write_simple_error(client, "ERR", "EXEC without MULTI")
+            switch state {
+            case .Immediate:   write_simple_error(client, "ERR", "EXEC without MULTI")
+            case .Transaction: state = .Execute
+            case .Execute:     unreachable()
             }
         
         ////////////////////////////////////////////////
@@ -558,14 +563,16 @@ handle_client :: proc (task: thread.Task) {
             write_simple_error(client, "ERR", "unknown command")
         }
         
-        if inside_multi {
+        switch state {
+        case .Transaction:
             write_simple_string(client, "OK")
-        } else {
-            if did_exec {
-                did_exec = false
-                write_array_len(client, len(commands))
-            }
             
+        case .Execute:
+            state = .Immediate
+            write_array_len(client, len(commands))
+            
+            fallthrough
+        case .Immediate:
             for command in commands {
                 switch cmd in command {
                 case Set:
