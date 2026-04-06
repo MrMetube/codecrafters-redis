@@ -3,22 +3,14 @@ package main
 import "core:sync"
 import "core:time"
 
-list_append :: proc (list: ^Value, s: string, loc := #caller_location) {
+list_append :: proc (list: ^Value, value: string, loc := #caller_location) {
     assert(list.kind == .List, loc = loc)
-    
-    s := clone_string(s, context.allocator)
-    
-    append(&list.items, s)
-    sync.sema_post(&list.items_semaphore, 1)
+    value_add_item(list, value, len(list.items))
 }
 
-list_prepend :: proc (list: ^Value, s: string, loc := #caller_location) {
+list_prepend :: proc (list: ^Value, value: string, loc := #caller_location) {
     assert(list.kind == .List, loc = loc)
-    
-    s := clone_string(s, context.allocator)
-    
-    inject_at(&list.items, 0, s)
-    sync.sema_post(&list.items_semaphore, 1)
+    value_add_item(list, value, 0)
 }
 
 list_pop :: proc (list: ^Value, loc := #caller_location) -> string {

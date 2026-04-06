@@ -111,7 +111,7 @@ handle_client :: proc (task: thread.Task) {
         }
         
         client.request = transmute(string) buffer[:bytes_read]
-        fmt.eprintf("full request \n`````\n%v`````\n", client.request)
+        // fmt.eprintf("full request \n`````\n%v`````\n", client.request)
         
         // @todo(viktor): we could preparse/presplit based on count
         line, _ := chop(&client.request, "\r\n")
@@ -426,6 +426,27 @@ handle_client :: proc (task: thread.Task) {
             added_count := set_add(set, score, value)
             write_simple_integer(client, added_count)
         
+        case "ZRANK":
+            key := parse_key(client) or_break handle
+            
+            set, set_ok := store_get(client.store, key, .ZSet)
+            if !set_ok {
+                write_bulk_string_nil(client)
+                break handle
+            }
+            
+            fmt.eprintf("items = %v\n", set.items)
+            fmt.eprintf("score = %v\n", set.members_score)
+            
+            value := chop_bulk_string(client) or_break handle
+            
+            rank, ok := set_rank(set, value)
+            if !ok {
+                write_bulk_string_nil(client)
+            } else {
+                write_simple_integer(client, rank)
+            }
+        
         ////////////////////////////////////////////////
             
         case:
@@ -442,28 +463,55 @@ handle_client :: proc (task: thread.Task) {
 set_add :: proc (set: ^Value, score: f32, value: string, loc := #caller_location) -> int {
     assert(set.kind == .ZSet, loc = loc)
     
-    inject_index := 0
+    index := len(set.items)
     // @speed binary search?
     search: for it_score, score_index in set.members_score {
         it_content := set.items[score_index]
         if it_content == value && it_score < score {
-            inject_index = -1
+            index = -1
             break search
         }
+        
+        if it_score == score {
+            if value < it_content {
+                index = score_index
+            } else {
+                index = score_index+1
+            }
+            break search
+        }
+        
         if it_score > score {
-            inject_index = score_index
+            index = score_index
             break search
         }
     }
     
     result: int
-    if inject_index >= 0 {
-        inject_at(&set.items,         inject_index, value)
-        inject_at(&set.members_score, inject_index, score)
+    if index >= 0 {
+        value_add_item(set, value, index)
+        inject_at(&set.members_score, index, score)
         result += 1
     }
     
     return result
+}
+
+set_rank :: proc (set: ^Value, value: string, loc := #caller_location) -> (int, bool) {
+    assert(set.kind == .ZSet, loc = loc)
+    
+    result: int
+    ok: bool
+    
+    search: for it, it_index in set.items {
+        if it == value {
+            result = it_index
+            ok = true
+            break search
+        }
+    }
+    
+    return result, ok
 }
 
 clone_string :: proc (s: string, allocator := context.allocator) -> string {
@@ -471,6 +519,13 @@ clone_string :: proc (s: string, allocator := context.allocator) -> string {
     copy(bytes, s)
     result := transmute(string) bytes
     return result
+}
+
+value_add_item :: proc (value: ^Value, s: string, index: int) {
+    s := clone_string(s, context.allocator)
+    
+    inject_at(&value.items, index, s)
+    sync.sema_post(&value.items_semaphore, 1)
 }
 
 value_set :: proc (value: ^Value, s: string, expiration := time.Time{}, loc := #caller_location) {
