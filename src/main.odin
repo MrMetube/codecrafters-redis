@@ -453,13 +453,13 @@ handle_client :: proc (task: thread.Task) {
             start := parse_integer(client) or_break handle
             stop  := parse_integer(client) or_break handle
             
-            list, list_ok := store_get(client.store, key, .ZSet)
-            if !list_ok {
+            set, set_ok := store_get(client.store, key, .ZSet)
+            if !set_ok {
                 write_array_len(client, 0)
                 break handle
             }
             
-            slice := set_slice(list, start, stop)
+            slice := set_slice(set, start, stop)
             write_array_of_bulk_string(client, slice)
             
         ////////////////////////////////////////////////
