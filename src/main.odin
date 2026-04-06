@@ -356,21 +356,8 @@ handle_client :: proc (task: thread.Task) {
                 break handle
             }
             
-            start, start_ok := parse_id(start_id)
-            stop, stop_ok   := parse_id(stop_id)
-            // @api, pass default?
-            if !start_ok {
-                if start.millis != -1 {
-                    start.sequence = 0
-                    start_ok = true
-                }
-            }
-            if !stop_ok {
-                if stop.millis != -1 {
-                    stop.sequence = max(int)
-                    stop_ok = true
-                }
-            }
+            start, start_ok := parse_id(start_id, 0)
+            stop, stop_ok   := parse_id(stop_id,  max(int))
             if !start_ok || !stop_ok {
                 write_simple_error(client, "ERR", "bad id")
                 break handle
@@ -710,8 +697,8 @@ parse_key :: proc (client: ^Client) -> (string, bool) {
     return key, key_ok
 }
 
-parse_id :: proc (id: string) -> (Stream_Id, bool) {
-    result := Stream_Id { -1, -1 }
+parse_id :: proc (id: string, default_sequence := -1) -> (Stream_Id, bool) {
+    result := Stream_Id { -1, default_sequence }
     parse_millis   := false
     parse_sequence := false
     if id == "*" {
@@ -741,7 +728,7 @@ parse_id :: proc (id: string) -> (Stream_Id, bool) {
         assert(ok)
     }
     
-    ok := result.millis != -1 && result.sequence != -1
+    ok := result.millis != -1
     
     return result, ok
 }
