@@ -62,11 +62,26 @@ Value :: struct {
     members_score: [dynamic] f64,
 }
 
-Command :: union {
+// @todo(viktor): port everything to commands
+Command :: struct {
+    kind: Command_Kind,
+    
+    key:        string,
+    value:      string,
+    expiration: time.Time,
+}
+
+Command_Kind :: enum {
+    None,
+    
     Ping,
     Echo,
     
     Type,
+    
+    Multi,
+    Exec,
+    Discard,
     
     Set,
     Get,
@@ -89,27 +104,6 @@ Command :: union {
     // ZScore,
     // ZRange,
     // ZCard,
-}
-
-Ping :: struct {}
-Echo :: struct {
-    content: string,
-}
-
-Type :: struct {
-    key: string,
-}
-
-Set :: struct {
-    key:   string,
-    value: string,
-    expiration: time.Time,
-}
-Get :: struct {
-    key: string,
-}
-Incr :: struct {
-    key: string,
 }
 
 main :: proc () {
@@ -187,31 +181,34 @@ handle_client :: proc (task: thread.Task) {
         ok: bool
         line, ok = chop(&client.request, "\r\n")
         assert(ok)
-        command, command_ok := parse_bulk_string(&client.request, &line)
+        command_string, command_ok := parse_bulk_string(&client.request, &line)
         assert(command_ok)
             
-        command = strings.to_upper(command, context.temp_allocator)
+        command_string = strings.to_upper(command_string, context.temp_allocator)
         
-        handle: switch command {
+        command: Command
+        handle: switch command_string {
         case "PING":
-            append(&commands, Ping{})
+            command.kind = .Ping
             
         case "ECHO":
             message := expect_bulk_string(client) or_break handle
-            append(&commands, Echo{ message })
             
+            command.kind = .Echo
+            command.value = clone_string(message)
             
         case "TYPE":
             key := parse_key(client) or_break handle
             
-            append(&commands, Type{ clone_string(key, context.allocator) })
+            command.kind = .Type
+            command.key = clone_string(key)
             
         ////////////////////////////////////////////////
             
         case "SET":
             key := parse_key(client) or_break handle
             
-            content := expect_bulk_string(client, "bad value") or_break handle
+            value := expect_bulk_string(client, "bad value") or_break handle
             
             expiration: time.Time
             if client.request != "" {
@@ -233,34 +230,51 @@ handle_client :: proc (task: thread.Task) {
                 expiration   = time.time_add(time.now(), duration)
             }
             
-            append(&commands, Set{ clone_string(key), clone_string(content), expiration })
+            command.kind = .Set
+            command.key = clone_string(key)
+            command.value = clone_string(value)
+            command.expiration = expiration
             
         case "GET":
             key := parse_key(client) or_break handle
-            append(&commands, Get { clone_string(key, context.allocator) })
+            
+            command.kind = .Get
+            command.key = clone_string(key)
             
         case "INCR":
             key := parse_key(client) or_break handle
-            append(&commands, Incr{ clone_string(key) })
+            
+            command.kind = .Incr
+            command.key = clone_string(key)
             
         ////////////////////////////////////////////////
         
         case "MULTI":
-            state = .Transaction
+            switch state {
+            case .Immediate:         state = .Transaction
+            case .Transaction:       write_simple_error(client, "ERR", "MULTI inside MULTI"); break handle
+            case .Execute, .Discard: unreachable()
+            }    
+            
+            command.kind = .Multi
             
         case "EXEC":
             switch state {
-            case .Immediate:         write_simple_error(client, "ERR", "EXEC without MULTI")
+            case .Immediate:         write_simple_error(client, "ERR", "EXEC without MULTI"); break handle
             case .Transaction:       state = .Execute
             case .Execute, .Discard: unreachable()
             }
             
+            command.kind = .Exec
+            
         case "DISCARD":
             switch state {
-            case .Immediate:         write_simple_error(client, "ERR", "DISCARD without MULTI")
+            case .Immediate:         write_simple_error(client, "ERR", "DISCARD without MULTI"); break handle
             case .Transaction:       state = .Discard
             case .Execute, .Discard: unreachable()
             }
+            
+            command.kind = .Discard
         
         ////////////////////////////////////////////////
             
@@ -575,9 +589,13 @@ handle_client :: proc (task: thread.Task) {
             write_simple_error(client, "ERR", "unknown command")
         }
         
+        if command.kind not_in (bit_set[Command_Kind] { .None, .Multi, .Exec, .Discard }) {
+            append(&commands, command)
+        }
+        
         switch state {
         case .Transaction:
-            if command == "MULTI" {
+            if command.kind == .Multi {
                 write_simple_string(client, "OK")
             } else {
                 write_simple_string(client, "QUEUED")
@@ -595,36 +613,38 @@ handle_client :: proc (task: thread.Task) {
             fallthrough
         case .Immediate:
             for command in commands {
-                switch cmd in command {
-                case Ping:
+                switch command.kind {
+                case .None, .Multi, .Exec, .Discard: unreachable()
+                
+                case .Ping:
                     write_simple_string(client, "PONG")
                     
-                case Echo:
-                    write_bulk_string(client, cmd.content)
+                case .Echo:
+                    write_bulk_string(client, command.value)
                 
                 ////////////////////////////////////////////////
                 
-                case Type:
-                    kind := store_get_kind(client.store, cmd.key)
+                case .Type:
+                    kind := store_get_kind(client.store, command.key)
                     write_bulk_string(client, Value_Kind_String[kind])
                 
                 ////////////////////////////////////////////////
                 
-                case Set:
-                    value, _ := store_get(client.store, cmd.key, .String, replace_previous = true)
-                    value_set(value, cmd.value, expiration = cmd.expiration)
+                case .Set:
+                    value, _ := store_get(client.store, command.key, .String, replace_previous = true)
+                    value_set(value, command.value, expiration = command.expiration)
                     write_simple_string(client, "OK")
                     
-                case Get:
-                    value, value_ok := store_get_readonly(client.store, cmd.key, .String)
+                case .Get:
+                    value, value_ok := store_get_readonly(client.store, command.key, .String)
                     if !value_ok {
                         write_bulk_string_nil(client)
                     } else {
                         write_bulk_string(client, value_get(value))
                     }
                     
-                case Incr:
-                    value, _ := store_get(client.store, cmd.key, .String, or_insert = true)
+                case .Incr:
+                    value, _ := store_get(client.store, command.key, .String, or_insert = true)
                     
                     content := value_get(value^)
                     if content == "" {
