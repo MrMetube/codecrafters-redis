@@ -5,8 +5,8 @@ import "core:net"
 import "core:strings"
 import "core:thread"
 import "core:time"
-import "core:sync"
 import "core:strconv"
+import "core:sync"
 
 Client :: struct{
     store:   ^Store,
@@ -51,28 +51,12 @@ Value :: struct {
     string_content: string,
     
     // list
-    content_waiting_room: sync.Sema,
+    content_semaphore: sync.Sema,
     content: [dynamic] string,
     
     // stream
-    entries: [dynamic] Stream_Entry,
+    entries:    [dynamic] Stream_Entry,
     entries_kv: [dynamic] Stream_Key_Value,
-}
-
-Stream_Entry :: struct {
-    id: Stream_Id,
-    kv_start: int,
-    kv_count: int,
-}
-
-Stream_Id :: struct {
-    millis:   int,
-    sequence: int,
-}
-
-Stream_Key_Value :: struct {
-    key:   string,
-    value: string,
 }
 
 main :: proc (){
@@ -214,10 +198,10 @@ handle_client :: proc (task: thread.Task) {
             for client.request != "" {
                 value := expect_bulk_string(client, "bad value") or_break handle
                 
-                value_append(list, value)
+                list_append(list, value)
             }
             
-            write_simple_integer(client, value_len(list))
+            write_simple_integer(client, list_len(list))
             
         case "LPUSH":
             key := parse_key(client) or_break handle
@@ -228,16 +212,16 @@ handle_client :: proc (task: thread.Task) {
                 value := expect_bulk_string(client, "bad value") or_break handle
                 
                 // @speed collect then prepend once to avoid multiple copies
-                value_prepend(list, value)
+                list_prepend(list, value)
             }
             
-            write_simple_integer(client, value_len(list))
+            write_simple_integer(client, list_len(list))
             
         case "LLEN":
             key := parse_key(client) or_break handle
             
             list, list_ok := store_get(client.store, key, .List)
-            write_simple_integer(client, value_len(list))
+            write_simple_integer(client, list_len(list))
             
         case "LRANGE":
             key := parse_key(client) or_break handle
@@ -251,7 +235,7 @@ handle_client :: proc (task: thread.Task) {
                 break handle
             }
             
-            slice := value_slice(list, start, stop)
+            slice := list_slice(list, start, stop)
             write_array_of_bulk_string(client, slice)
             
         case "LPOP":
@@ -263,22 +247,22 @@ handle_client :: proc (task: thread.Task) {
             }
             
             list, list_ok := store_get(client.store, key, .List)
-            if value_len(list) == 0 {
+            if list_len(list) == 0 {
                 list_ok = false
             }
             
             if count == 1 {
                 if list_ok {
-                    popped := value_pop(list)
+                    popped := list_pop(list)
                     write_bulk_string(client, popped)
                 } else {
                     write_bulk_string_nil(client)
                 }
             } else {
-                slice := value_slice(list, 0, count-1)
+                slice := list_slice(list, 0, count-1)
                 write_array_of_bulk_string(client, slice)
                 // @cleanup
-                for _ in 0..<count do value_pop(list)
+                for _ in 0..<count do list_pop(list)
             }
             
         case "BLPOP":
@@ -294,8 +278,7 @@ handle_client :: proc (task: thread.Task) {
             
             list, _ := store_get(client.store, key, .List, or_insert = true)
             
-            ok := sync.sema_wait_with_timeout(&list.content_waiting_room, timeout)
-            if !ok {
+            if !list_block(list, timeout) {
                 write_array_nil(client)
                 break handle
             }
@@ -305,7 +288,7 @@ handle_client :: proc (task: thread.Task) {
                 break handle
             }
             
-            popped := value_pop(list)
+            popped := list_pop(list)
             write_array_of_bulk_string(client, {key, popped})
     
         ////////////////////////////////////////////////
@@ -444,31 +427,6 @@ clone_string :: proc (s: string, allocator := context.allocator) -> string {
     return result
 }
 
-value_append :: proc (value: ^Value, s: string, loc := #caller_location) {
-    assert(value.kind == .List, loc = loc)
-    
-    s := clone_string(s, context.allocator)
-    
-    append(&value.content, s)
-    sync.sema_post(&value.content_waiting_room, 1)
-}
-
-value_prepend :: proc (value: ^Value, s: string, loc := #caller_location) {
-    assert(value.kind == .List, loc = loc)
-    
-    s := clone_string(s, context.allocator)
-    
-    inject_at(&value.content, 0, s)
-    sync.sema_post(&value.content_waiting_room, 1)
-}
-
-value_pop :: proc (value: ^Value, loc := #caller_location) -> string {
-    assert(value.kind == .List, loc = loc)
-    
-    result := pop_front(&value.content, loc = loc)
-    return result
-}
-
 value_set :: proc (value: ^Value, s: string, expiration := time.Time{}, loc := #caller_location) {
     assert(value.kind == .String, loc = loc)
     
@@ -481,128 +439,6 @@ value_get :: proc (value: ^Value, loc := #caller_location) -> string {
     
     result := value.string_content
     return result
-}
-
-value_len :: proc (value: ^Value, loc := #caller_location) -> int {
-    result: int
-    
-    if value != nil {
-        assert(value.kind == .List)
-        result = len(value.content)
-    }
-    
-    return result
-}
-
-value_slice :: proc (value: ^Value, start, stop: int, loc := #caller_location) -> [] string {
-    assert(value.kind == .List, loc = loc)
-    
-    start, stop := start, stop
-    
-    list_ok := value != nil
-    if list_ok {
-        count := len(value.content)
-        if start < 0 {
-            if start < -count {
-                start = 0 
-            } else {
-                start = ((start % count) + count) % count
-            }
-        }
-        
-        if stop < 0 {
-            stop = ((stop % count) + count) % count
-        } else if stop > count {
-            stop = count-1
-        }
-    }
-        
-    if start > stop {
-        list_ok = false
-    }
-    
-    if list_ok && start >= len(value.content) {
-        list_ok = false
-    }
-    
-    result: [] string
-    if list_ok {
-        result = value.content[start:stop+1]
-    }
-    return result
-}
-
-////////////////////////////////////////////////
-
-Id_Error :: enum {
-    none,
-    id_too_smol,
-    bad_nil_value,
-}
-
-// @todo(viktor): should the stream be locked by a mutex for the whole operation?
-stream_begin_entry :: proc (stream: ^Value, id_string: string, loc := #caller_location) -> (^Stream_Entry, Id_Error) {
-    assert(stream.kind == .Stream, loc = loc)
-    
-    id, id_ok := parse_id(id_string) 
-    
-    error := Id_Error.none
-    if len(stream.entries) > 0 {
-        last := stream.entries[len(stream.entries)-1]
-        
-        if id.millis < last.id.millis {
-            error = .id_too_smol
-        }
-        
-        if id.millis == last.id.millis {
-            if id.sequence == -1 {
-                id.sequence = last.id.sequence + 1
-            } else {
-                if id.sequence <= last.id.sequence {
-                    error = .id_too_smol
-                }
-            }
-        }
-    }
-    
-    if id.sequence == -1 {
-        if id.millis == 0 {
-            id.sequence = 1
-        } else {
-            id.sequence = 0
-        }
-    }
-    
-    assert(id.millis != -1)
-    assert(id.sequence != -1)
-    
-    if id.millis == 0 && id.sequence == 0 {
-        error = .bad_nil_value
-    }
-    
-    result: ^Stream_Entry
-    if error == .none {
-        count := len(stream.entries)
-        append_nothing(&stream.entries)
-        result = &stream.entries[count]
-        result.id = id
-        result.kv_start = len(stream.entries_kv)
-    }
-    
-    return result, error
-}
-
-stream_add_item :: proc (stream: ^Value, entry: ^Stream_Entry, key, value: string, loc := #caller_location) {
-    assert(stream.kind == .Stream, loc = loc)
-    
-    key   := clone_string(key, context.allocator)
-    value := clone_string(value, context.allocator)
-    append(&stream.entries_kv, Stream_Key_Value{key, value})
-    entry.kv_count += 1
-}
-
-stream_end_entry :: proc (stream: ^Value, entry: ^Stream_Entry, loc := #caller_location) {
-    assert(stream.kind == .Stream, loc = loc)
 }
 
 ////////////////////////////////////////////////
