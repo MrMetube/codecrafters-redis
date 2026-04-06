@@ -59,7 +59,8 @@ Value :: struct {
 }
 
 Stream_Entry :: struct {
-    id: string,
+    id_millis:   time.Duration,
+    id_sequence: int,
     kv_start: int,
     kv_count: int,
 }
@@ -130,7 +131,7 @@ handle_client :: proc (task: thread.Task) {
             count, ok = strconv.parse_u64(line)
             assert(ok)
         }
-            
+        
         ok: bool
         line, ok = chop(&client.request, "\r\n")
         assert(ok)
@@ -144,13 +145,13 @@ handle_client :: proc (task: thread.Task) {
             write_simple_string(client, "PONG")
             
         case "ECHO":
-            message, message_ok := chop_line_and_parse_bulk_string(&client.request)
-            assert(message_ok)
+            message := expect_bulk_string(client) or_break handle
             
             write_bulk_string(client, message)
             
         case "TYPE":
             key := parse_key(client) or_break handle
+            
             type := store_type(client.store, key)
             
             write_simple_string(client, Value_Kind_String[type])
@@ -158,45 +159,21 @@ handle_client :: proc (task: thread.Task) {
         case "SET":
             key := parse_key(client) or_break handle
             
-            content, content_ok := chop_line_and_parse_bulk_string(&client.request)
-            if !content_ok {
-                write_simple_error(client, "ERR", "bad value")
-                break handle
-            }
+            content := expect_bulk_string(client, "bad value") or_break handle
             
             expiration: time.Time
             if client.request != "" {
-                optional, optional_ok := chop_line_and_parse_bulk_string(&client.request)
-                if !optional_ok {
-                    write_simple_error(client, "ERR", "bad optional")
-                    break handle
-                }
-                
+                optional := expect_bulk_string(client, "bad optional") or_break handle
                 optional = strings.to_upper(optional)
+                
                 switch optional {
                 case "EX":
-                    seconds, seconds_ok := chop_line_and_parse_bulk_string(&client.request)
-                    if !seconds_ok {
-                        write_simple_error(client, "ERR", "bad optional")
-                        break handle
-                    }
-                    
-                    secs, secs_ok := strconv.parse_u64(seconds)
-                    assert(secs_ok)
-                    
-                    expiration = time.time_add(time.now(), time.Second * cast(time.Duration) secs)
+                    seconds := parse_float(client) or_break handle
+                    expiration = time.time_add(time.now(), cast(time.Duration) (cast(f32) time.Second * seconds))
                 
                 case "PX":
-                    milliseconds, milliseconds_ok := chop_line_and_parse_bulk_string(&client.request)
-                    if !milliseconds_ok {
-                        write_simple_error(client, "ERR", "bad optional")
-                        break handle
-                    }
-                    
-                    millis, millis_ok := strconv.parse_u64(milliseconds)
-                    assert(millis_ok)
-                    
-                    expiration = time.time_add(time.now(), time.Millisecond * cast(time.Duration) millis)
+                    milliseconds := parse_float(client) or_break handle
+                    expiration = time.time_add(time.now(), cast(time.Duration) (cast(f32) time.Millisecond * milliseconds))
                     
                 case:
                     write_simple_error(client, "ERR", "unknown optional")
@@ -212,9 +189,7 @@ handle_client :: proc (task: thread.Task) {
         case "GET":
             key := parse_key(client) or_break handle
             
-            fmt.eprintln("get", key)
             value, value_ok := store_get(client.store, key, .String)
-            fmt.eprintln("get", value, value_ok)
             
             if !value_ok {
                 write_bulk_string_nil(client)
@@ -228,12 +203,8 @@ handle_client :: proc (task: thread.Task) {
             list, list_ok := store_get(client.store, key, .List, or_insert = true)
             
             for client.request != "" {
-                value, value_ok := chop_line_and_parse_bulk_string(&client.request)
-                if !value_ok {
-                    write_simple_error(client, "ERR", "bad value")
-                    break handle
-                }
-            
+                value := expect_bulk_string(client, "bad value") or_break handle
+                
                 value_append(list, value)
             }
             
@@ -245,11 +216,7 @@ handle_client :: proc (task: thread.Task) {
             list, list_ok := store_get(client.store, key, .List, or_insert = true)
             
             for client.request != "" {
-                value, value_ok := chop_line_and_parse_bulk_string(&client.request)
-                if !value_ok {
-                    write_simple_error(client, "ERR", "bad value")
-                    break handle
-                }
+                value := expect_bulk_string(client, "bad value") or_break handle
                 
                 // @speed collect then prepend once to avoid multiple copies
                 value_prepend(list, value)
@@ -345,22 +312,15 @@ handle_client :: proc (task: thread.Task) {
             
             stream, _ := store_get(client.store, key, .Stream, or_insert = true)
             
-            id, ok := chop_line_and_parse_bulk_string(&client.request)
+            id, ok := chop_bulk_string(&client.request)
             assert(ok)
             
             entry := stream_begin_entry(stream, id)
-            
-            item_key: string
-            item_value: string
-            item_key, ok = chop_line_and_parse_bulk_string(&client.request)
-            assert(ok)
-            item_value, ok = chop_line_and_parse_bulk_string(&client.request)
-            assert(ok)
-            stream_add_item(stream, entry, item_key, item_value)
-            for client.request != "" {
-                item_key,   _ = chop_line_and_parse_bulk_string(&client.request)
-                item_value, _ = chop_line_and_parse_bulk_string(&client.request)
+            for {
+                item_key   := expect_bulk_string(client, "bad entry key") or_break handle
+                item_value := expect_bulk_string(client, "bad entry value") or_break handle
                 stream_add_item(stream, entry, item_key, item_value)
+                if client.request == "" do break
             }
             stream_end_entry(stream, entry)
             
@@ -483,20 +443,92 @@ value_slice :: proc (value: ^Value, start, stop: int, loc := #caller_location) -
 ////////////////////////////////////////////////
 
 // @todo(viktor): should the stream be locked by a mutex for the whole operation?
-stream_begin_entry :: proc (stream: ^Value, id: string, loc := #caller_location) -> ^Stream_Entry {
+stream_begin_entry :: proc (stream: ^Value, id: string, loc := #caller_location) -> (^Stream_Entry, bool) {
     assert(stream.kind == .Stream, loc = loc)
     
-    count := len(stream.entries)
-    append_nothing(&stream.entries)
-    entry := &stream.entries[count]
-    entry.id = id
-    entry.kv_start = len(stream.entries_kv)
-    return entry
+    milliseconds: time.Duration = -1
+    sequence: int = -1
+    parse_millis   := false
+    parse_sequence := false
+    if id == "*" {
+        milliseconds = time.diff(time.Time{}, time.now())
+    } else if strings.ends_with(id, "*") {
+        parse_millis = true
+    } else {
+        parse_millis   = true
+        parse_sequence = true
+    }
+    
+    if parse_millis {
+        id := id
+        milli_string, ok := chop(&id, "-")
+        assert(ok)
+        
+        xx: i64
+        xx, ok = strconv.parse_i64(milli_string)
+        assert(ok)
+        milliseconds = cast(time.Duration) xx
+    }
+    
+    if parse_sequence {
+        xx, ok := strconv.parse_i64(id)
+        assert(ok)
+        sequence = cast(int) xx
+    }
+    
+    time_ok := true
+    milliseconds = (milliseconds / time.Millisecond) * time.Millisecond
+    if len(stream.entries) == 0 {
+        last := stream.entries[len(stream.entries)]
+        
+        if last.id_millis > milliseconds {
+            time_ok = false
+        }
+        
+        if sequence != -1 {
+            if last.id_millis == milliseconds {
+                if last.id_sequence <= sequence {
+                    time_ok = false
+                }
+            }
+        } else {
+            sequence = last.id_sequence + 1
+        }
+    } else {
+        if sequence != -1 {
+            if milliseconds == 0 && sequence < 1 {
+                time_ok = false
+            }
+        } else {
+            if milliseconds == 0 {
+                sequence = 1
+            } else {
+                sequence = 0
+            }
+        }
+    }
+    
+    assert(milliseconds != -1)
+    assert(sequence != -1)
+    
+    result: ^Stream_Entry
+    if time_ok {
+        count := len(stream.entries)
+        append_nothing(&stream.entries)
+        result = &stream.entries[count]
+        result.id_millis   = milliseconds
+        result.id_sequence = sequence
+        result.kv_start = len(stream.entries_kv)
+    }
+    
+    return result, time_ok
 }
 
 stream_add_item :: proc (stream: ^Value, entry: ^Stream_Entry, key, value: string, loc := #caller_location) {
     assert(stream.kind == .Stream, loc = loc)
     
+    key   := clone_string(key, context.allocator)
+    value := clone_string(value, context.allocator)
     append(&stream.entries_kv, Stream_Key_Value{key, value})
     entry.kv_count += 1
 }
@@ -606,7 +638,7 @@ send :: proc (client: ^Client) {
 ////////////////////////////////////////////////
 
 parse_key :: proc (client: ^Client) -> (string, bool) {
-    key, key_ok := chop_line_and_parse_bulk_string(&client.request)
+    key, key_ok := chop_bulk_string(&client.request)
     if !key_ok {
         write_simple_error(client, "ERR", "missing key")
     }
@@ -614,7 +646,7 @@ parse_key :: proc (client: ^Client) -> (string, bool) {
 }
 
 parse_integer :: proc (client: ^Client) -> (int, bool) {
-    text, text_ok := chop_line_and_parse_bulk_string(&client.request)
+    text, text_ok := chop_bulk_string(&client.request)
     
     result, ok := strconv.parse_int(text)
     if !text_ok || !ok {
@@ -625,7 +657,7 @@ parse_integer :: proc (client: ^Client) -> (int, bool) {
 }
 
 parse_float :: proc (client: ^Client) -> (f32, bool) {
-    text, text_ok := chop_line_and_parse_bulk_string(&client.request)
+    text, text_ok := chop_bulk_string(&client.request)
     
     result, ok := strconv.parse_f32(text)
     if !text_ok || !ok {
@@ -635,7 +667,15 @@ parse_float :: proc (client: ^Client) -> (f32, bool) {
     return result, ok
 }
 
-chop_line_and_parse_bulk_string :: proc (request: ^string) -> (string, bool) {
+expect_bulk_string :: proc (client: ^Client, error_message := "expected bulk string") -> (string, bool) {
+    s, ok := chop_bulk_string(&client.request)
+    if !ok {
+        write_simple_error(client, "ERR", error_message)
+    }
+    return s, ok
+}
+
+chop_bulk_string :: proc (request: ^string) -> (string, bool) {
     line, line_ok := chop(request, "\r\n")
     if !line_ok do return "", false
     
