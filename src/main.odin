@@ -465,12 +465,14 @@ set_add :: proc (set: ^Value, score: f32, value: string, loc := #caller_location
     
     // @speed hash lookup
     do_add := true
+    is_update := false
     for it, it_index in set.items {
         if it == value {
             it_score := set.members_score[it_index]
             if it_score < score {
                 do_add = false
             } else {
+                is_update = true
                 ordered_remove(&set.items, it_index)
             }
             break
@@ -499,7 +501,9 @@ set_add :: proc (set: ^Value, score: f32, value: string, loc := #caller_location
         
         value_add_item(set, value, index)
         inject_at(&set.members_score, index, score)
-        result += 1
+        if !is_update {
+            result += 1
+        }
     }
     
     return result
