@@ -205,7 +205,6 @@ handle_client :: proc (task: thread.Task) {
             }
             
             number, ok := strconv.parse_int(content)
-            fmt.eprintf("content = `%v`, number = %v\n", content, number)
             
             if ok {
                 number += 1
@@ -215,6 +214,12 @@ handle_client :: proc (task: thread.Task) {
                 write_simple_error(client, "ERR", "value is not an integer or out of range")
             }
             
+        ////////////////////////////////////////////////
+        
+        case "MULTI":
+            write_simple_string(client, "OK")
+            // @todo(viktor): dont close connection
+        
         ////////////////////////////////////////////////
             
         case "RPUSH":
@@ -596,7 +601,7 @@ value_get :: proc (value: ^Value, loc := #caller_location) -> string {
 
 store_type :: proc (store: ^Store, key: string) -> Value_Kind {
     begin_ticket_mutex(&store.mutex)
-    value, value_ok := &store.db[key]
+    value, value_ok := store.db[key]
     end_ticket_mutex(&store.mutex)
     
     result: Value_Kind
