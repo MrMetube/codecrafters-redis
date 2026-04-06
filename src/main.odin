@@ -59,10 +59,14 @@ Value :: struct {
 }
 
 Stream_Entry :: struct {
-    id_millis:   time.Duration,
-    id_sequence: int,
+    id: Stream_Id,
     kv_start: int,
     kv_count: int,
+}
+
+Stream_Id :: struct {
+    millis:   int,
+    sequence: int,
 }
 
 Stream_Key_Value :: struct {
@@ -325,7 +329,7 @@ handle_client :: proc (task: thread.Task) {
                 }
                 stream_end_entry(stream, entry)
                 
-                write_bulk_string(client, fmt.tprintf("%v-%v", cast(int) entry.id_millis, entry.id_sequence))
+                write_sequence_id(client, entry.id)
             } else {
                 message: string
                 switch entry_error {
@@ -336,6 +340,71 @@ handle_client :: proc (task: thread.Task) {
                 write_simple_error(client, "ERR", message)
             }
             
+        case "XRANGE":
+            key := parse_key(client) or_break handle
+            
+            stream, stream_ok := store_get(client.store, key, .Stream)
+            if !stream_ok {
+                write_simple_error(client, "ERR", "unknown stream")
+                break handle
+            }
+            
+            start_id, start_id_ok := chop_bulk_string(&client.request)
+            stop_id, stop_id_ok  := chop_bulk_string(&client.request)
+            if !start_id_ok || !stop_id_ok {
+                write_simple_error(client, "ERR", "bad start stop")
+                break handle
+            }
+            
+            start, start_ok := parse_id(start_id)
+            stop, stop_ok   := parse_id(stop_id)
+            // @api, pass default?
+            if !start_ok {
+                if start.millis != -1 {
+                    start.sequence = 0
+                    start_ok = true
+                }
+            }
+            if !stop_ok {
+                if stop.millis != -1 {
+                    stop.sequence = max(int)
+                    stop_ok = true
+                }
+            }
+            if !start_ok || !stop_ok {
+                write_simple_error(client, "ERR", "bad id")
+                break handle
+            }
+            
+            entry_start, entry_stop := len(stream.entries), len(stream.entries)
+            find: for entry, entry_index in stream.entries {
+                if entry_start == -1 {
+                    if entry.id.millis >= start.millis && entry.id.sequence >= start.sequence {
+                        entry_start = entry_index
+                    }
+                } else {
+                    if entry.id.millis > stop.millis && entry.id.sequence > stop.sequence {
+                        entry_stop = entry_index
+                        break find
+                    }
+                }
+            }
+            
+            
+            
+            entries := stream.entries[entry_start:entry_stop]
+            write_array_len(client, len(entries))
+            for entry in entries {
+                write_array_len(client, 2)
+                write_sequence_id(client, entry.id)
+                
+                write_array_len(client, entry.kv_count*2)
+                for kv_index in entry.kv_start..<entry.kv_start+entry.kv_count {
+                    kv := stream.entries_kv[kv_index]
+                    write_bulk_string(client, kv.key)
+                    write_bulk_string(client, kv.value)
+                }
+            }
             
         case:
             write_simple_error(client, "ERR", "unknown command")
@@ -458,81 +527,53 @@ Id_Error :: enum {
     id_too_smol,
     bad_nil_value,
 }
+
 // @todo(viktor): should the stream be locked by a mutex for the whole operation?
-stream_begin_entry :: proc (stream: ^Value, id: string, loc := #caller_location) -> (^Stream_Entry, Id_Error) {
+stream_begin_entry :: proc (stream: ^Value, id_string: string, loc := #caller_location) -> (^Stream_Entry, Id_Error) {
     assert(stream.kind == .Stream, loc = loc)
     
-    milliseconds: time.Duration = -1
-    sequence: int = -1
-    parse_millis   := false
-    parse_sequence := false
-    if id == "*" {
-        milliseconds = time.diff(time.Time{}, time.now()) / time.Millisecond
-    } else if strings.ends_with(id, "*") {
-        parse_millis = true
-    } else {
-        parse_millis   = true
-        parse_sequence = true
-    }
-    
-    id := id
-    if parse_millis {
-        milli_string, ok := chop(&id, "-")
-        assert(ok)
-        
-        xx: i64
-        xx, ok = strconv.parse_i64(milli_string)
-        assert(ok)
-        milliseconds = cast(time.Duration) xx
-    }
-    
-    if parse_sequence {
-        xx, ok := strconv.parse_i64(id)
-        assert(ok)
-        sequence = cast(int) xx
-    }
+    id, id_ok := parse_id(id_string) 
     
     error := Id_Error.none
     if len(stream.entries) > 0 {
         last := stream.entries[len(stream.entries)-1]
         
-        if milliseconds < last.id_millis {
+        if id.millis < last.id.millis {
             error = .id_too_smol
         }
         
-        if milliseconds == last.id_millis {
-            if sequence == -1 {
-                sequence = last.id_sequence + 1
+        if id.millis == last.id.millis {
+            if id.sequence == -1 {
+                id.sequence = last.id.sequence + 1
             } else {
-                if sequence <= last.id_sequence {
+                if id.sequence <= last.id.sequence {
                     error = .id_too_smol
                 }
             }
         }
     }
     
-    if sequence == -1 {
-        if milliseconds == 0 {
-            sequence = 1
+    if id.sequence == -1 {
+        if id.millis == 0 {
+            id.sequence = 1
         } else {
-            sequence = 0
+            id.sequence = 0
         }
     }
     
-    if milliseconds == 0 && sequence == 0 {
+    assert(id.millis != -1)
+    assert(id.sequence != -1)
+    
+    if id.millis == 0 && id.sequence == 0 {
         error = .bad_nil_value
     }
-    
-    assert(milliseconds != -1)
-    assert(sequence != -1)
     
     result: ^Stream_Entry
     if error == .none {
         count := len(stream.entries)
         append_nothing(&stream.entries)
         result = &stream.entries[count]
-        result.id_millis   = milliseconds
-        result.id_sequence = sequence
+        result.id = id
         result.kv_start = len(stream.entries_kv)
     }
     
@@ -631,8 +672,12 @@ write_bulk_string_nil :: proc (client: ^Client) {
     fmt.sbprint(&client.response, "$-1\r\n")
 }
 
+write_array_len :: proc (client: ^Client, array_len: int) {
+    fmt.sbprintf(&client.response, "*%v\r\n", array_len)
+}
+
 write_array_of_bulk_string :: proc (client: ^Client, array: [] string) {
-    fmt.sbprintf(&client.response, "*%v\r\n", len(array))
+    write_array_len(client, len(array))
     for value in array {
         write_bulk_string(client, value)
     }
@@ -641,6 +686,13 @@ write_array_of_bulk_string :: proc (client: ^Client, array: [] string) {
 write_bulk_string :: proc (client: ^Client, data: string) {
     fmt.sbprintf(&client.response, "$%v\r\n%v\r\n", len(data), data)
 }
+
+////////////////////////////////////////////////
+
+write_sequence_id :: proc (client: ^Client, id: Stream_Id) {
+    write_bulk_string(client, fmt.tprintf("%v-%v", id.millis, id.sequence))
+}
+    
 
 ////////////////////////////////////////////////
 
@@ -658,6 +710,42 @@ parse_key :: proc (client: ^Client) -> (string, bool) {
         write_simple_error(client, "ERR", "missing key")
     }
     return key, key_ok
+}
+
+parse_id :: proc (id: string) -> (Stream_Id, bool) {
+    result := Stream_Id { -1, -1 }
+    parse_millis   := false
+    parse_sequence := false
+    if id == "*" {
+        result.millis = cast(int) (time.diff(time.Time{}, time.now()) / time.Millisecond)
+    } else if strings.ends_with(id, "*") {
+        parse_millis = true
+    } else {
+        parse_millis   = true
+        parse_sequence = true
+    }
+    
+    id := id
+    if parse_millis {
+        milli_string, ok := chop(&id, "-")
+        if !ok {
+            milli_string = id
+            parse_sequence = false
+        }
+        
+        result.millis, ok = strconv.parse_int(milli_string)
+        assert(ok)
+    }
+    
+    if parse_sequence {
+        ok: bool
+        result.sequence, ok = strconv.parse_int(id)
+        assert(ok)
+    }
+    
+    ok := result.millis != -1 && result.sequence != -1
+    
+    return result, ok
 }
 
 parse_integer :: proc (client: ^Client) -> (int, bool) {
