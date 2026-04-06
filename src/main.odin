@@ -541,6 +541,13 @@ set_rank :: proc (set: ^Value, value: string, loc := #caller_location) -> (int, 
     return result, ok
 }
 
+set_slice :: proc (set: ^Value, start, stop: int, loc := #caller_location) -> [] string {
+    assert(set.kind == .ZSet, loc = loc)
+    
+    result := value_slice(set, start, stop)
+    return result
+}
+
 clone_string :: proc (s: string, allocator := context.allocator) -> string {
     bytes := make([] u8, len(s), allocator)
     copy(bytes, s)
@@ -553,6 +560,42 @@ value_add_item :: proc (value: ^Value, s: string, index: int) {
     
     inject_at(&value.items, index, s)
     sync.sema_post(&value.items_semaphore, 1)
+}
+
+value_slice :: proc (value: ^Value, start, stop: int) -> [] string {
+    start, stop := start, stop
+    
+    list_ok := value != nil
+    if list_ok {
+        count := len(value.items)
+        if start < 0 {
+            if start < -count {
+                start = 0 
+            } else {
+                start = ((start % count) + count) % count
+            }
+        }
+        
+        if stop < 0 {
+            stop = ((stop % count) + count) % count
+        } else if stop > count {
+            stop = count-1
+        }
+    }
+        
+    if start > stop {
+        list_ok = false
+    }
+    
+    if list_ok && start >= len(value.items) {
+        list_ok = false
+    }
+    
+    result: [] string
+    if list_ok {
+        result = value.items[start:stop+1]
+    }
+    return result
 }
 
 value_set :: proc (value: ^Value, s: string, expiration := time.Time{}, loc := #caller_location) {

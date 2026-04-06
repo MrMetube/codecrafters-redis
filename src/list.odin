@@ -34,38 +34,7 @@ list_len :: proc (list: ^Value, loc := #caller_location) -> int {
 list_slice :: proc (list: ^Value, start, stop: int, loc := #caller_location) -> [] string {
     assert(list.kind == .List, loc = loc)
     
-    start, stop := start, stop
-    
-    list_ok := list != nil
-    if list_ok {
-        count := len(list.items)
-        if start < 0 {
-            if start < -count {
-                start = 0 
-            } else {
-                start = ((start % count) + count) % count
-            }
-        }
-        
-        if stop < 0 {
-            stop = ((stop % count) + count) % count
-        } else if stop > count {
-            stop = count-1
-        }
-    }
-        
-    if start > stop {
-        list_ok = false
-    }
-    
-    if list_ok && start >= len(list.items) {
-        list_ok = false
-    }
-    
-    result: [] string
-    if list_ok {
-        result = list.items[start:stop+1]
-    }
+    result := value_slice(list, start, stop)
     return result
 }
 
