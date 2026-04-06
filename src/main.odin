@@ -21,7 +21,6 @@ Store :: struct {
     db:    map[string] Value,
     mutex: TicketMutex,
 }
-    
 
 Value_Kind :: enum {
     None,
@@ -63,6 +62,43 @@ Value :: struct {
     members_score: [dynamic] f64,
 }
 
+Command :: union {
+    // Ping,
+    // Echo,
+    // Type,
+    Set,
+    // Get,
+    Incr,
+    
+    // RPush,
+    // LPush,
+    // LLen,
+    // LRange,
+    // LPop,
+    // BLPop,
+    
+    // XAdd,
+    // XRange,
+    // XRead,
+    
+    // ZAdd,
+    // ZRem,
+    // ZRank,
+    // ZScore,
+    // ZRange,
+    // ZCard,
+}
+
+Set :: struct {
+    key:   string,
+    value: string,
+    expiration: time.Time,
+}
+
+Incr :: struct {
+    key: string,
+}
+
 main :: proc () {
     pool: thread.Pool
     thread.pool_init(&pool, context.allocator, 11)
@@ -98,6 +134,9 @@ handle_client :: proc (task: thread.Task) {
     defer net.close(client.socket)
     
     buffer: [2048] u8
+    inside_multi: bool
+    did_exec: bool
+    commands: [dynamic] Command
     for {
         bytes_read, receive_err := net.recv(client.socket, buffer[:])
         if receive_err == .Connection_Closed do break
@@ -176,11 +215,7 @@ handle_client :: proc (task: thread.Task) {
                 expiration   = time.time_add(time.now(), duration)
             }
             
-            value, _ := store_get(client.store, key, .String, replace_previous = true)
-            
-            value_set(value, clone_string(content, context.allocator), expiration = expiration)
-            
-            write_simple_string(client, "OK")
+            append(&commands, Set{ clone_string(key), clone_string(content), expiration })
             
         case "GET":
             key := parse_key(client) or_break handle
@@ -195,30 +230,19 @@ handle_client :: proc (task: thread.Task) {
             
         case "INCR":
             key := parse_key(client) or_break handle
-            
-            value, _ := store_get(client.store, key, .String, or_insert = true)
-            
-            content := value_get(value)
-            if content == "" {
-                value_set(value, "0")
-                content = value_get(value)
-            }
-            
-            number, ok := strconv.parse_int(content)
-            
-            if ok {
-                number += 1
-                value_set(value, fmt.aprintf("%v", number, allocator = context.allocator))
-                write_simple_integer(client, number)
-            } else {
-                write_simple_error(client, "ERR", "value is not an integer or out of range")
-            }
+            append(&commands, Incr{ clone_string(key) })
             
         ////////////////////////////////////////////////
         
         case "MULTI":
-            write_simple_string(client, "OK")
-            // @todo(viktor): dont close connection
+            inside_multi = true
+            
+        case "EXEC":
+            if inside_multi {
+                inside_multi = false
+            } else {
+                write_simple_error(client, "ERR", "EXEC without MULTI")
+            }
         
         ////////////////////////////////////////////////
             
@@ -522,6 +546,45 @@ handle_client :: proc (task: thread.Task) {
             
         case:
             write_simple_error(client, "ERR", "unknown command")
+        }
+        
+        if inside_multi {
+            write_simple_string(client, "OK")
+        } else {
+            if did_exec {
+                did_exec = false
+                write_array_len(client, len(commands))
+            }
+            
+            for command in commands {
+                switch cmd in command {
+                case Set:
+                    value, _ := store_get(client.store, cmd.key, .String, replace_previous = true)
+                    value_set(value, cmd.value, expiration = cmd.expiration)
+                    write_simple_string(client, "OK")
+                    
+                case Incr:
+                    value, _ := store_get(client.store, cmd.key, .String, or_insert = true)
+                    
+                    content := value_get(value)
+                    if content == "" {
+                        value_set(value, "0")
+                        content = value_get(value)
+                    }
+                    
+                    number, ok := strconv.parse_int(content)
+                    
+                    if ok {
+                        number += 1
+                        value_set(value, fmt.aprintf("%v", number, allocator = context.allocator))
+                        write_simple_integer(client, number)
+                    } else {
+                        write_simple_error(client, "ERR", "value is not an integer or out of range")
+                    }
+                }
+            }
+            
+            clear(&commands)
         }
         
         fmt.eprintf("sending response ```\n%v```", strings.to_string(client.response))
