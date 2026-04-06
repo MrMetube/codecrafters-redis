@@ -426,6 +426,20 @@ handle_client :: proc (task: thread.Task) {
             
             added_count := zset_add(zset, score, value)
             write_simple_integer(client, added_count)
+            
+        case "ZREM":
+            key := parse_key(client) or_break handle
+            
+            zset, zset_ok := store_get(client.store, key, .ZSet)
+            if !zset_ok {
+                write_simple_integer(client, 0)
+                break handle
+            }
+            
+            value := chop_bulk_string(client) or_break handle
+            
+            removed_count := zset_remove(zset, value)
+            write_simple_integer(client, removed_count)
         
         case "ZRANK":
             key := parse_key(client) or_break handle
@@ -510,7 +524,9 @@ zset_add :: proc (set: ^Value, score: f64, value: string, loc := #caller_locatio
                 do_add = false
             } else {
                 is_update = true
-                ordered_remove(&set.items, it_index)
+                // @copypasta
+                ordered_remove(&set.items,         it_index)
+                ordered_remove(&set.members_score, it_index)
             }
             break
         }
@@ -570,6 +586,20 @@ zset_score :: proc (set: ^Value, value: string, loc := #caller_location) -> (f64
     result := set.members_score[index]
     
     return result, ok
+}
+
+zset_remove :: proc (set: ^Value, value: string, loc := #caller_location) -> int {
+    assert(set.kind == .ZSet, loc = loc)
+    
+    index, ok := zset_rank(set, value, loc)
+    result: int
+    if ok {
+        ordered_remove(&set.items,         index)
+        ordered_remove(&set.members_score, index)
+        result += 1
+    }
+    
+    return result
 }
 
 zset_card :: proc (set: ^Value, loc := #caller_location) -> int {
