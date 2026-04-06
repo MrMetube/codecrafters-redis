@@ -48,15 +48,19 @@ Value :: struct {
     expiration: time.Time,
     
     // string
-    string_content: string,
+    content: string,
     
     // list
-    content_semaphore: sync.Sema,
-    content: [dynamic] string,
+    items_semaphore: sync.Sema,
+    items: [dynamic] string,
     
     // stream
     entries:    [dynamic] Stream_Entry,
     entries_kv: [dynamic] Stream_Key_Value,
+    
+    // sorted set
+    members_content: [dynamic] string,
+    members_score:   [dynamic] f32,
 }
 
 main :: proc () {
@@ -283,7 +287,7 @@ handle_client :: proc (task: thread.Task) {
                 break handle
             }
             
-            if len(list.content) == 0 {
+            if len(list.items) == 0 {
                 write_simple_error(client, "ERR", "internal blocking error")
                 break handle
             }
@@ -298,7 +302,7 @@ handle_client :: proc (task: thread.Task) {
             
             stream, _ := store_get(client.store, key, .Stream, or_insert = true)
             
-            id, ok := chop_bulk_string(&client.request)
+            id, ok := chop_bulk_string(client)
             assert(ok)
             
             entry, entry_error := stream_begin_entry(stream, id)
@@ -332,8 +336,8 @@ handle_client :: proc (task: thread.Task) {
                 break handle
             }
             
-            start_id, start_id_ok := chop_bulk_string(&client.request)
-            stop_id,  stop_id_ok  := chop_bulk_string(&client.request)
+            start_id, start_id_ok := chop_bulk_string(client)
+            stop_id,  stop_id_ok  := chop_bulk_string(client)
             if !start_id_ok || !stop_id_ok {
                 write_simple_error(client, "ERR", "bad start stop")
                 break handle
@@ -367,7 +371,7 @@ handle_client :: proc (task: thread.Task) {
             }
             
         case "XREAD":
-            streams, streams_ok := chop_bulk_string(&client.request)
+            streams, streams_ok := chop_bulk_string(client)
             if !streams_ok || streams != "streams" {
                 write_simple_error(client, "ERR", "missing 'streams'")
                 break handle
@@ -381,7 +385,7 @@ handle_client :: proc (task: thread.Task) {
                 break handle
             }
             
-            id_string, id_string_ok := chop_bulk_string(&client.request)
+            id_string, id_string_ok := chop_bulk_string(client)
             if !id_string_ok {
                 write_simple_error(client, "ERR", "bad id")
                 break handle
@@ -411,6 +415,21 @@ handle_client :: proc (task: thread.Task) {
                 write_stream_entry(client, stream, &entry)
             }
             
+        ////////////////////////////////////////////////
+        
+        case "ZADD":
+            key := parse_key(client) or_break handle
+            
+            set, _ := store_get(client.store, key, .ZSet, or_insert = true)
+            
+            score := parse_float(client) or_break handle
+            value := chop_bulk_string(client) or_break handle
+            
+            added_count := set_add(set, score, value)
+            write_simple_integer(client, added_count)
+        
+        ////////////////////////////////////////////////
+            
         case:
             write_simple_error(client, "ERR", "unknown command")
         }
@@ -418,6 +437,26 @@ handle_client :: proc (task: thread.Task) {
         fmt.eprintf("sending response ```\n%v```", strings.to_string(client.response))
         send(client)
     }
+}
+
+////////////////////////////////////////////////
+
+set_add :: proc (set: ^Value, score: f32, value: string, loc := #caller_location) -> int {
+    assert(set.kind == .ZSet, loc = loc)
+    
+    inject_index := 0
+    // @speed binary search?
+    search: for it_score, score_index in set.members_score {
+        if it_score > score {
+            inject_index = score_index
+            break search
+        }
+    }
+    
+    inject_at(&set.members_content, inject_index, value)
+    inject_at(&set.members_score,   inject_index, score)
+    
+    return 1
 }
 
 clone_string :: proc (s: string, allocator := context.allocator) -> string {
@@ -430,14 +469,14 @@ clone_string :: proc (s: string, allocator := context.allocator) -> string {
 value_set :: proc (value: ^Value, s: string, expiration := time.Time{}, loc := #caller_location) {
     assert(value.kind == .String, loc = loc)
     
-    value.string_content = s
+    value.content = s
     value.expiration = expiration
 }
 
 value_get :: proc (value: ^Value, loc := #caller_location) -> string {
     assert(value.kind == .String, loc = loc)
     
-    result := value.string_content
+    result := value.content
     return result
 }
 
@@ -566,7 +605,7 @@ send :: proc (client: ^Client) {
 ////////////////////////////////////////////////
 
 parse_key :: proc (client: ^Client) -> (string, bool) {
-    key, key_ok := chop_bulk_string(&client.request)
+    key, key_ok := chop_bulk_string(client)
     if !key_ok {
         write_simple_error(client, "ERR", "missing key")
     }
@@ -644,7 +683,7 @@ parse_id :: proc (id: string, default_sequence := -1) -> (Stream_Id, bool) {
 }
 
 parse_integer :: proc (client: ^Client) -> (int, bool) {
-    text, text_ok := chop_bulk_string(&client.request)
+    text, text_ok := chop_bulk_string(client)
     
     result, ok := strconv.parse_int(text)
     if !text_ok || !ok {
@@ -655,7 +694,7 @@ parse_integer :: proc (client: ^Client) -> (int, bool) {
 }
 
 parse_float :: proc (client: ^Client) -> (f32, bool) {
-    text, text_ok := chop_bulk_string(&client.request)
+    text, text_ok := chop_bulk_string(client)
     
     result, ok := strconv.parse_f32(text)
     if !text_ok || !ok {
@@ -666,18 +705,18 @@ parse_float :: proc (client: ^Client) -> (f32, bool) {
 }
 
 expect_bulk_string :: proc (client: ^Client, error_message := "expected bulk string") -> (string, bool) {
-    s, ok := chop_bulk_string(&client.request)
+    s, ok := chop_bulk_string(client)
     if !ok {
         write_simple_error(client, "ERR", error_message)
     }
     return s, ok
 }
 
-chop_bulk_string :: proc (request: ^string) -> (string, bool) {
-    line, line_ok := chop(request, "\r\n")
+chop_bulk_string :: proc (client: ^Client) -> (string, bool) {
+    line, line_ok := chop(&client.request, "\r\n")
     if !line_ok do return "", false
     
-    result, ok := parse_bulk_string(request, &line)
+    result, ok := parse_bulk_string(&client.request, &line)
     return result, ok
 }
 

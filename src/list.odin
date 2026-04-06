@@ -8,8 +8,8 @@ list_append :: proc (list: ^Value, s: string, loc := #caller_location) {
     
     s := clone_string(s, context.allocator)
     
-    append(&list.content, s)
-    sync.sema_post(&list.content_semaphore, 1)
+    append(&list.items, s)
+    sync.sema_post(&list.items_semaphore, 1)
 }
 
 list_prepend :: proc (list: ^Value, s: string, loc := #caller_location) {
@@ -17,14 +17,14 @@ list_prepend :: proc (list: ^Value, s: string, loc := #caller_location) {
     
     s := clone_string(s, context.allocator)
     
-    inject_at(&list.content, 0, s)
-    sync.sema_post(&list.content_semaphore, 1)
+    inject_at(&list.items, 0, s)
+    sync.sema_post(&list.items_semaphore, 1)
 }
 
 list_pop :: proc (list: ^Value, loc := #caller_location) -> string {
     assert(list.kind == .List, loc = loc)
     
-    result := pop_front(&list.content, loc = loc)
+    result := pop_front(&list.items, loc = loc)
     return result
 }
 
@@ -33,7 +33,7 @@ list_len :: proc (list: ^Value, loc := #caller_location) -> int {
     
     if list != nil {
         assert(list.kind == .List, loc = loc)
-        result = len(list.content)
+        result = len(list.items)
     }
     
     return result
@@ -46,7 +46,7 @@ list_slice :: proc (list: ^Value, start, stop: int, loc := #caller_location) -> 
     
     list_ok := list != nil
     if list_ok {
-        count := len(list.content)
+        count := len(list.items)
         if start < 0 {
             if start < -count {
                 start = 0 
@@ -66,13 +66,13 @@ list_slice :: proc (list: ^Value, start, stop: int, loc := #caller_location) -> 
         list_ok = false
     }
     
-    if list_ok && start >= len(list.content) {
+    if list_ok && start >= len(list.items) {
         list_ok = false
     }
     
     result: [] string
     if list_ok {
-        result = list.content[start:stop+1]
+        result = list.items[start:stop+1]
     }
     return result
 }
@@ -80,6 +80,6 @@ list_slice :: proc (list: ^Value, start, stop: int, loc := #caller_location) -> 
 list_block :: proc (list: ^Value, timeout := max(time.Duration), loc := #caller_location) -> bool {
     assert(list.kind == .List, loc = loc)
     
-    ok := sync.sema_wait_with_timeout(&list.content_semaphore, timeout)
+    ok := sync.sema_wait_with_timeout(&list.items_semaphore, timeout)
     return ok
 }
