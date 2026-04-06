@@ -716,11 +716,11 @@ store_get :: proc (store: ^Store, key: string, kind: Value_Kind, or_insert := fa
 ////////////////////////////////////////////////
 
 write_simple_integer :: proc (client: ^Client, data: int) {
-    fmt.sbprintf(&client.response, ":%.*f\r\n", math.MAX_F32_PRECISION, data)
+    fmt.sbprintf(&client.response, ":%v\r\n", data)
 }
 
 write_simple_float :: proc (client: ^Client, data: f32) {
-    write_bulk_string(client, fmt.tprintf("%v", data))
+    write_bulk_string(client, fmt.tprintf("%.*f", math.MAX_F32_PRECISION, data))
 }
 
 write_simple_string :: proc (client: ^Client, data: string) {
