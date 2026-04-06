@@ -4,48 +4,42 @@ zset_add :: proc (set: ^Value, score: f64, value: string, loc := #caller_locatio
     assert(set.kind == .ZSet, loc = loc)
     
     // @speed hash lookup
-    do_add := true
     is_update := false
     for it, it_index in set.items {
         if it == value {
             it_score := set.members_score[it_index]
-            if it_score < score {
-                do_add = false
-            } else {
-                is_update = true
-                // @copypasta
-                ordered_remove(&set.items,         it_index)
-                ordered_remove(&set.members_score, it_index)
-            }
+            is_update = true
+            // @copypasta
+            ordered_remove(&set.items,         it_index)
+            ordered_remove(&set.members_score, it_index)
             break
         }
     }
     
-    result: int
-    if do_add {
-        index := len(set.items)
-        search: for it_score, score_index in set.members_score {
-            if it_score == score {
-                it_content := set.items[score_index]
-                if value < it_content {
-                    index = score_index
-                } else {
-                    index = score_index+1
-                }
-                break search
-            }
-            
-            if it_score > score {
+    index := len(set.items)
+    search: for it_score, score_index in set.members_score {
+        if it_score == score {
+            it_content := set.items[score_index]
+            if value < it_content {
                 index = score_index
-                break search
+            } else {
+                index = score_index+1
             }
+            break search
         }
         
-        value_add_item(set, value, index)
-        inject_at(&set.members_score, index, score)
-        if !is_update {
-            result += 1
+        if it_score > score {
+            index = score_index
+            break search
         }
+    }
+    
+    value_add_item(set, value, index)
+    inject_at(&set.members_score, index, score)
+    
+    result: int
+    if !is_update {
+        result += 1
     }
     
     return result
