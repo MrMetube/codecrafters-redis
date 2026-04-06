@@ -240,6 +240,7 @@ handle_client :: proc (task: thread.Task) {
         case "EXEC":
             if inside_multi {
                 inside_multi = false
+                did_exec = true
             } else {
                 write_simple_error(client, "ERR", "EXEC without MULTI")
             }
