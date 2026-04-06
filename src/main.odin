@@ -720,7 +720,7 @@ write_simple_integer :: proc (client: ^Client, data: int) {
 }
 
 write_simple_float :: proc (client: ^Client, data: f64) {
-    write_bulk_string(client, fmt.tprintf("%.*f", math.MAX_F32_PRECISION, data))
+    write_bulk_string(client, fmt.tprintf("%.*f", math.MAX_F64_PRECISION, data))
 }
 
 write_simple_string :: proc (client: ^Client, data: string) {
