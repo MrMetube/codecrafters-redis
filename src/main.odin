@@ -59,7 +59,7 @@ Value :: struct {
     entries_kv: [dynamic] Stream_Key_Value,
 }
 
-main :: proc (){
+main :: proc () {
     pool: thread.Pool
     thread.pool_init(&pool, context.allocator, 11)
     thread.pool_start(&pool)
