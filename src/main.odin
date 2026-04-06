@@ -459,7 +459,7 @@ handle_client :: proc (task: thread.Task) {
                 break handle
             }
             
-            slice := list_slice(list, start, stop)
+            slice := set_slice(list, start, stop)
             write_array_of_bulk_string(client, slice)
             
         ////////////////////////////////////////////////
