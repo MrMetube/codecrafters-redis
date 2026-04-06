@@ -10,14 +10,15 @@ import "core:thread"
 import "core:time"
 
 Client :: struct{
-    store:   ^Store,
-    socket:  net.TCP_Socket,
-    request: string,
+    store:    ^Store,
+    
+    socket:   net.TCP_Socket,
+    request:  string,
     response: strings.Builder,
 }
 
 Store :: struct {
-    db: map[string] Value,
+    db:    map[string] Value,
     mutex: TicketMutex,
 }
     
@@ -59,7 +60,7 @@ Value :: struct {
     entries: [dynamic] Stream_Entry,
     
     // sorted set
-    members_score:   [dynamic] f64,
+    members_score: [dynamic] f64,
 }
 
 main :: proc () {
@@ -158,7 +159,7 @@ handle_client :: proc (task: thread.Task) {
             expiration: time.Time
             if client.request != "" {
                 optional := expect_bulk_string(client, "bad optional") or_break handle
-                optional = strings.to_upper(optional)
+                optional = strings.to_upper(optional, context.temp_allocator)
                 
                 factor: time.Duration
                 switch optional {
@@ -176,7 +177,8 @@ handle_client :: proc (task: thread.Task) {
             }
             
             the_value, _ := store_get(client.store, key, .String, replace_previous = true)
-            value_set(the_value, content, expiration = expiration)
+            
+            value_set(the_value, clone_string(content, context.allocator), expiration = expiration)
             
             write_simple_string(client, "OK")
             
@@ -189,6 +191,26 @@ handle_client :: proc (task: thread.Task) {
                 write_bulk_string_nil(client)
             } else {
                 write_bulk_string(client, value_get(value))
+            }
+            
+        case "INCR":
+            key := parse_key(client) or_break handle
+            
+            value, _ := store_get(client.store, key, .String, or_insert = true)
+            
+            content := value_get(value)
+            if content == "" {
+                value_set(value, "1")
+                content = value_get(value)
+            }
+             
+            number, ok := strconv.parse_int(content)
+            if ok {
+                number += 1
+                value_set(value, fmt.aprint(number, context.allocator))
+                write_simple_integer(client, number)
+            } else {
+                
             }
             
         ////////////////////////////////////////////////
@@ -581,8 +603,6 @@ store_type :: proc (store: ^Store, key: string) -> Value_Kind {
 }
 
 store_get :: proc (store: ^Store, key: string, kind: Value_Kind, or_insert := false, replace_previous := false) -> (^Value, bool) {
-    key := clone_string(key)
-    
     begin_ticket_mutex(&store.mutex)
     value, value_ok := &store.db[key]
     end_ticket_mutex(&store.mutex)
@@ -597,6 +617,7 @@ store_get :: proc (store: ^Store, key: string, kind: Value_Kind, or_insert := fa
     }
     
     if make_new {
+        key := clone_string(key)
         begin_ticket_mutex(&store.mutex)
         store.db[key] = {
             kind = kind,
