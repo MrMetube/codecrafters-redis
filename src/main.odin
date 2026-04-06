@@ -378,7 +378,7 @@ handle_client :: proc (task: thread.Task) {
             
             entry_start, entry_stop := len(stream.entries), len(stream.entries)
             find: for entry, entry_index in stream.entries {
-                if entry_start == -1 {
+                if entry_start == len(stream.entries) {
                     if entry.id.millis >= start.millis && entry.id.sequence >= start.sequence {
                         entry_start = entry_index
                     }
@@ -389,8 +389,6 @@ handle_client :: proc (task: thread.Task) {
                     }
                 }
             }
-            
-            
             
             entries := stream.entries[entry_start:entry_stop]
             write_array_len(client, len(entries))
