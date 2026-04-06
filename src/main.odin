@@ -721,7 +721,7 @@ parse_id_or_last_id :: proc (stream: ^Value, id: string, default_sequence := -1)
     ok: bool
     if id == "+" {
         if len(stream.entries) > 0 {
-            result = stream.entries[len(stream.entries)].id
+            result = stream.entries[len(stream.entries)-1].id
             ok = true
         }
     } else {
