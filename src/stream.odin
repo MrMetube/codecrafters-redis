@@ -11,11 +11,6 @@ Stream_Id :: struct {
     sequence: int,
 }
 
-Stream_Key_Value :: struct {
-    key:   string,
-    value: string,
-}
-
 Id_Error :: enum {
     none,
     id_too_smol,
@@ -70,7 +65,7 @@ stream_begin_entry :: proc (stream: ^Value, id_string: string, loc := #caller_lo
         append_nothing(&stream.entries)
         result = &stream.entries[count]
         result.id = id
-        result.kv_start = len(stream.entries_kv)
+        result.kv_start = len(stream.items)
     }
     
     return result, error
@@ -81,7 +76,8 @@ stream_add_item :: proc (stream: ^Value, entry: ^Stream_Entry, key, value: strin
     
     key   := clone_string(key, context.allocator)
     value := clone_string(value, context.allocator)
-    append(&stream.entries_kv, Stream_Key_Value{key, value})
+    append(&stream.items, key)
+    append(&stream.items, value)
     entry.kv_count += 1
 }
 

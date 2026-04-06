@@ -55,11 +55,9 @@ Value :: struct {
     items: [dynamic] string,
     
     // stream
-    entries:    [dynamic] Stream_Entry,
-    entries_kv: [dynamic] Stream_Key_Value,
+    entries: [dynamic] Stream_Entry,
     
     // sorted set
-    members_content: [dynamic] string,
     members_score:   [dynamic] f32,
 }
 
@@ -453,8 +451,8 @@ set_add :: proc (set: ^Value, score: f32, value: string, loc := #caller_location
         }
     }
     
-    inject_at(&set.members_content, inject_index, value)
-    inject_at(&set.members_score,   inject_index, score)
+    inject_at(&set.items,         inject_index, value)
+    inject_at(&set.members_score, inject_index, score)
     
     return 1
 }
@@ -586,12 +584,8 @@ write_stream_entry :: proc (client: ^Client, stream: ^Value, entry: ^Stream_Entr
     write_array_len(client, 2)
     write_sequence_id(client, entry.id)
     
-    write_array_len(client, entry.kv_count*2)
-    for kv_index in entry.kv_start..<entry.kv_start+entry.kv_count {
-        kv := stream.entries_kv[kv_index]
-        write_bulk_string(client, kv.key)
-        write_bulk_string(client, kv.value)
-    }
+    entries := stream.items[entry.kv_start:][:entry.kv_count*2]
+    write_array_of_bulk_string(client, entries)
 }
 
 ////////////////////////////////////////////////
