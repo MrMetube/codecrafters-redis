@@ -176,9 +176,9 @@ handle_client :: proc (task: thread.Task) {
                 expiration   = time.time_add(time.now(), duration)
             }
             
-            the_value, _ := store_get(client.store, key, .String, replace_previous = true)
+            value, _ := store_get(client.store, key, .String, replace_previous = true)
             
-            value_set(the_value, clone_string(content, context.allocator), expiration = expiration)
+            value_set(value, clone_string(content, context.allocator), expiration = expiration)
             
             write_simple_string(client, "OK")
             
