@@ -1,12 +1,13 @@
 package main
 
 import "core:fmt"
+import "core:math"
 import "core:net"
 import "core:strings"
-import "core:thread"
-import "core:time"
 import "core:strconv"
 import "core:sync"
+import "core:thread"
+import "core:time"
 
 Client :: struct{
     store:   ^Store,
@@ -453,9 +454,6 @@ handle_client :: proc (task: thread.Task) {
                 break handle
             }
             
-            fmt.eprintf("items = %v\n", zset.items)
-            fmt.eprintf("score = %v\n", zset.members_score)
-            
             value := chop_bulk_string(client) or_break handle
             
             score, ok := zset_score(zset, value)
@@ -718,7 +716,7 @@ store_get :: proc (store: ^Store, key: string, kind: Value_Kind, or_insert := fa
 ////////////////////////////////////////////////
 
 write_simple_integer :: proc (client: ^Client, data: int) {
-    fmt.sbprintf(&client.response, ":%v\r\n", data)
+    fmt.sbprintf(&client.response, ":%.*f\r\n", math.MAX_F32_PRECISION, data)
 }
 
 write_simple_float :: proc (client: ^Client, data: f32) {
