@@ -435,9 +435,6 @@ handle_client :: proc (task: thread.Task) {
                 break handle
             }
             
-            fmt.eprintf("items = %v\n", zset.items)
-            fmt.eprintf("score = %v\n", zset.members_score)
-            
             value := chop_bulk_string(client) or_break handle
             
             rank, ok := zset_rank(zset, value)
@@ -445,6 +442,27 @@ handle_client :: proc (task: thread.Task) {
                 write_bulk_string_nil(client)
             } else {
                 write_simple_integer(client, rank)
+            }
+            
+        case "ZSCORE":
+            key := parse_key(client) or_break handle
+            
+            zset, zset_ok := store_get(client.store, key, .ZSet)
+            if !zset_ok {
+                write_bulk_string_nil(client)
+                break handle
+            }
+            
+            fmt.eprintf("items = %v\n", zset.items)
+            fmt.eprintf("score = %v\n", zset.members_score)
+            
+            value := chop_bulk_string(client) or_break handle
+            
+            score, ok := zset_score(zset, value)
+            if !ok {
+                write_bulk_string_nil(client)
+            } else {
+                write_simple_float(client, score)
             }
                 
         case "ZRANGE":
@@ -543,6 +561,15 @@ zset_rank :: proc (set: ^Value, value: string, loc := #caller_location) -> (int,
             break search
         }
     }
+    
+    return result, ok
+}
+
+zset_score :: proc (set: ^Value, value: string, loc := #caller_location) -> (f32, bool) {
+    assert(set.kind == .ZSet, loc = loc)
+    
+    index, ok := zset_rank(set, value, loc)
+    result := set.members_score[index]
     
     return result, ok
 }
@@ -692,6 +719,10 @@ store_get :: proc (store: ^Store, key: string, kind: Value_Kind, or_insert := fa
 
 write_simple_integer :: proc (client: ^Client, data: int) {
     fmt.sbprintf(&client.response, ":%v\r\n", data)
+}
+
+write_simple_float :: proc (client: ^Client, data: f32) {
+    write_bulk_string(client, fmt.tprintf("%v", data))
 }
 
 write_simple_string :: proc (client: ^Client, data: string) {
