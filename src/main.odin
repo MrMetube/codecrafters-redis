@@ -467,7 +467,7 @@ stream_begin_entry :: proc (stream: ^Value, id: string, loc := #caller_location)
     parse_millis   := false
     parse_sequence := false
     if id == "*" {
-        milliseconds = time.diff(time.Time{}, time.now())
+        milliseconds = time.diff(time.Time{}, time.now()) / time.Millisecond
     } else if strings.ends_with(id, "*") {
         parse_millis = true
     } else {
