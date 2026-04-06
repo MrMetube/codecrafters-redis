@@ -67,7 +67,7 @@ Command :: union {
     // Echo,
     // Type,
     Set,
-    // Get,
+    Get,
     Incr,
     
     // RPush,
@@ -93,6 +93,10 @@ Set :: struct {
     key:   string,
     value: string,
     expiration: time.Time,
+}
+
+Get :: struct {
+    key: string,
 }
 
 Incr :: struct {
@@ -225,14 +229,7 @@ handle_client :: proc (task: thread.Task) {
             
         case "GET":
             key := parse_key(client) or_break handle
-            
-            value, value_ok := store_get(client.store, key, .String)
-            
-            if !value_ok {
-                write_bulk_string_nil(client)
-            } else {
-                write_bulk_string(client, value_get(value))
-            }
+            append(&commands, Get { clone_string(key, context.allocator) })
             
         case "INCR":
             key := parse_key(client) or_break handle
@@ -583,6 +580,14 @@ handle_client :: proc (task: thread.Task) {
                     value, _ := store_get(client.store, cmd.key, .String, replace_previous = true)
                     value_set(value, cmd.value, expiration = cmd.expiration)
                     write_simple_string(client, "OK")
+                    
+                case Get:
+                    value, value_ok := store_get(client.store, cmd.key, .String)
+                    if !value_ok {
+                        write_bulk_string_nil(client)
+                    } else {
+                        write_bulk_string(client, value_get(value))
+                    }
                     
                 case Incr:
                     value, _ := store_get(client.store, cmd.key, .String, or_insert = true)
