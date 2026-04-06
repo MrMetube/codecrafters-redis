@@ -5,6 +5,7 @@ import "core:net"
 import "core:strings"
 import "core:thread"
 import "core:time"
+import "core:sync"
 import "core:strconv"
 
 Client :: struct{
@@ -50,7 +51,7 @@ Value :: struct {
     string_content: string,
     
     // list
-    content_waiting_room: TicketMutex,
+    content_waiting_room: sync.Sema,
     content: [dynamic] string,
     
     // stream
@@ -160,6 +161,8 @@ handle_client :: proc (task: thread.Task) {
             
             write_simple_string(client, Value_Kind_String[type])
             
+        ////////////////////////////////////////////////
+            
         case "SET":
             key := parse_key(client) or_break handle
             
@@ -201,6 +204,8 @@ handle_client :: proc (task: thread.Task) {
                 write_bulk_string(client, value_get(value))
             }
             
+        ////////////////////////////////////////////////
+            
         case "RPUSH":
             key := parse_key(client) or_break handle
             
@@ -240,9 +245,13 @@ handle_client :: proc (task: thread.Task) {
             start := parse_integer(client) or_break handle
             stop  := parse_integer(client) or_break handle
             
-            list, _ := store_get(client.store, key, .List)
-            slice := value_slice(list, start, stop)
+            list, list_ok := store_get(client.store, key, .List)
+            if !list_ok {
+                write_array_len(client, 0)
+                break handle
+            }
             
+            slice := value_slice(list, start, stop)
             write_array_of_bulk_string(client, slice)
             
         case "LPOP":
@@ -284,32 +293,22 @@ handle_client :: proc (task: thread.Task) {
             }
             
             list, _ := store_get(client.store, key, .List, or_insert = true)
-            timed_out := false
             
-            ticket := ticket_mutex_take_ticket(&list.content_waiting_room)
-            if value_len(list) == 0 {
-                start := time.now()
-                block: for {
-                    if ticket_mutex_ticket_is_ready(&list.content_waiting_room, ticket) {
-                        break block
-                    }
-                    
-                    if time.since(start) > timeout {
-                        timed_out = true
-                        end_ticket_mutex(&list.content_waiting_room)
-                        break block
-                    }
-                    
-                    spin_hint()
-                }
-            }
-            
-            if timed_out {
+            ok := sync.sema_wait_with_timeout(&list.content_waiting_room, timeout)
+            if !ok {
                 write_array_nil(client)
-            } else {
-                popped := value_pop(list)
-                write_array_of_bulk_string(client, {key, popped})
+                break handle
             }
+            
+            if len(list.content) == 0 {
+                write_simple_error(client, "ERR", "internal blocking error")
+                break handle
+            }
+            
+            popped := value_pop(list)
+            write_array_of_bulk_string(client, {key, popped})
+    
+        ////////////////////////////////////////////////
             
         case "XADD":
             key := parse_key(client) or_break handle
@@ -450,13 +449,8 @@ value_append :: proc (value: ^Value, s: string, loc := #caller_location) {
     
     s := clone_string(s, context.allocator)
     
-    serving := volatile_load(&value.content_waiting_room.serving)
-    ticket  := volatile_load(&value.content_waiting_room.ticket)
-    if serving < ticket {
-        end_ticket_mutex(&value.content_waiting_room)
-    }
-    
     append(&value.content, s)
+    sync.sema_post(&value.content_waiting_room, 1)
 }
 
 value_prepend :: proc (value: ^Value, s: string, loc := #caller_location) {
@@ -464,13 +458,8 @@ value_prepend :: proc (value: ^Value, s: string, loc := #caller_location) {
     
     s := clone_string(s, context.allocator)
     
-    serving := volatile_load(&value.content_waiting_room.serving)
-    ticket  := volatile_load(&value.content_waiting_room.ticket)
-    if serving < ticket {
-        end_ticket_mutex(&value.content_waiting_room)
-    }
-    
     inject_at(&value.content, 0, s)
+    sync.sema_post(&value.content_waiting_room, 1)
 }
 
 value_pop :: proc (value: ^Value, loc := #caller_location) -> string {
