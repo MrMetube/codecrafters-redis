@@ -63,9 +63,11 @@ Value :: struct {
 }
 
 Command :: union {
-    // Ping,
-    // Echo,
-    // Type,
+    Ping,
+    Echo,
+    
+    Type,
+    
     Set,
     Get,
     Incr,
@@ -89,16 +91,23 @@ Command :: union {
     // ZCard,
 }
 
+Ping :: struct {}
+Echo :: struct {
+    content: string,
+}
+
+Type :: struct {
+    key: string,
+}
+
 Set :: struct {
     key:   string,
     value: string,
     expiration: time.Time,
 }
-
 Get :: struct {
     key: string,
 }
-
 Incr :: struct {
     key: string,
 }
@@ -143,6 +152,7 @@ handle_client :: proc (task: thread.Task) {
         Immediate,
         Transaction,
         Execute,
+        Discard,
     }
     state: State
     
@@ -184,19 +194,17 @@ handle_client :: proc (task: thread.Task) {
         
         handle: switch command {
         case "PING":
-            write_simple_string(client, "PONG")
+            append(&commands, Ping{})
             
         case "ECHO":
             message := expect_bulk_string(client) or_break handle
+            append(&commands, Echo{ message })
             
-            write_bulk_string(client, message)
             
         case "TYPE":
             key := parse_key(client) or_break handle
             
-            type := store_type(client.store, key)
-            
-            write_simple_string(client, Value_Kind_String[type])
+            append(&commands, Type{ clone_string(key, context.allocator) })
             
         ////////////////////////////////////////////////
             
@@ -242,9 +250,16 @@ handle_client :: proc (task: thread.Task) {
             
         case "EXEC":
             switch state {
-            case .Immediate:   write_simple_error(client, "ERR", "EXEC without MULTI")
-            case .Transaction: state = .Execute
-            case .Execute:     unreachable()
+            case .Immediate:         write_simple_error(client, "ERR", "EXEC without MULTI")
+            case .Transaction:       state = .Execute
+            case .Execute, .Discard: unreachable()
+            }
+            
+        case "DISCARD":
+            switch state {
+            case .Immediate:         write_simple_error(client, "ERR", "DISCARD without MULTI")
+            case .Transaction:       state = .Discard
+            case .Execute, .Discard: unreachable()
             }
         
         ////////////////////////////////////////////////
@@ -568,6 +583,11 @@ handle_client :: proc (task: thread.Task) {
                 write_simple_string(client, "QUEUED")
             }
             
+        case .Discard:
+            state = .Immediate
+            write_simple_string(client, "OK")
+            clear(&commands)
+            
         case .Execute:
             state = .Immediate
             write_array_len(client, len(commands))
@@ -576,13 +596,27 @@ handle_client :: proc (task: thread.Task) {
         case .Immediate:
             for command in commands {
                 switch cmd in command {
+                case Ping:
+                    write_simple_string(client, "PONG")
+                    
+                case Echo:
+                    write_bulk_string(client, cmd.content)
+                
+                ////////////////////////////////////////////////
+                
+                case Type:
+                    kind := store_get_kind(client.store, cmd.key)
+                    write_bulk_string(client, Value_Kind_String[kind])
+                
+                ////////////////////////////////////////////////
+                
                 case Set:
                     value, _ := store_get(client.store, cmd.key, .String, replace_previous = true)
                     value_set(value, cmd.value, expiration = cmd.expiration)
                     write_simple_string(client, "OK")
                     
                 case Get:
-                    value, value_ok := store_get(client.store, cmd.key, .String)
+                    value, value_ok := store_get_readonly(client.store, cmd.key, .String)
                     if !value_ok {
                         write_bulk_string_nil(client)
                     } else {
@@ -592,10 +626,10 @@ handle_client :: proc (task: thread.Task) {
                 case Incr:
                     value, _ := store_get(client.store, cmd.key, .String, or_insert = true)
                     
-                    content := value_get(value)
+                    content := value_get(value^)
                     if content == "" {
                         value_set(value, "0")
-                        content = value_get(value)
+                        content = value_get(value^)
                     }
                     
                     number, ok := strconv.parse_int(content)
@@ -677,7 +711,7 @@ value_set :: proc (value: ^Value, s: string, expiration := Maybe(time.Time){}, l
     }
 }
 
-value_get :: proc (value: ^Value, loc := #caller_location) -> string {
+value_get :: proc (value: Value, loc := #caller_location) -> string {
     assert(value.kind == .String, loc = loc)
     
     result := value.content
@@ -686,7 +720,7 @@ value_get :: proc (value: ^Value, loc := #caller_location) -> string {
 
 ////////////////////////////////////////////////
 
-store_type :: proc (store: ^Store, key: string) -> Value_Kind {
+store_get_kind :: proc (store: ^Store, key: string) -> Value_Kind {
     begin_ticket_mutex(&store.mutex)
     value, value_ok := store.db[key]
     end_ticket_mutex(&store.mutex)
