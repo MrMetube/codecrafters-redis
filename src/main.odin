@@ -315,16 +315,27 @@ handle_client :: proc (task: thread.Task) {
             id, ok := chop_bulk_string(&client.request)
             assert(ok)
             
-            entry := stream_begin_entry(stream, id)
-            for {
-                item_key   := expect_bulk_string(client, "bad entry key") or_break handle
-                item_value := expect_bulk_string(client, "bad entry value") or_break handle
-                stream_add_item(stream, entry, item_key, item_value)
-                if client.request == "" do break
+            entry, entry_error := stream_begin_entry(stream, id)
+            if entry_error == .none {
+                for {
+                    item_key   := expect_bulk_string(client, "bad entry key") or_break handle
+                    item_value := expect_bulk_string(client, "bad entry value") or_break handle
+                    stream_add_item(stream, entry, item_key, item_value)
+                    if client.request == "" do break
+                }
+                stream_end_entry(stream, entry)
+                
+                write_bulk_string(client, fmt.tprintf("%v-%v", cast(int) entry.id_millis, entry.id_sequence))
+            } else {
+                message: string
+                switch entry_error {
+                case .none: unreachable()
+                case .id_too_smol:   message = "The ID specified in XADD is equal or smaller than the target stream top item"
+                case .bad_nil_value: message = "The ID specified in XADD must be greater than 0-0"
+                }
+                write_simple_error(client, "ERR", message)
             }
-            stream_end_entry(stream, entry)
             
-            write_bulk_string(client, entry.id)
             
         case:
             write_simple_error(client, "ERR", "unknown command")
@@ -442,8 +453,13 @@ value_slice :: proc (value: ^Value, start, stop: int, loc := #caller_location) -
 
 ////////////////////////////////////////////////
 
+Id_Error :: enum {
+    none,
+    id_too_smol,
+    bad_nil_value,
+}
 // @todo(viktor): should the stream be locked by a mutex for the whole operation?
-stream_begin_entry :: proc (stream: ^Value, id: string, loc := #caller_location) -> (^Stream_Entry, bool) {
+stream_begin_entry :: proc (stream: ^Value, id: string, loc := #caller_location) -> (^Stream_Entry, Id_Error) {
     assert(stream.kind == .Stream, loc = loc)
     
     milliseconds: time.Duration = -1
@@ -459,8 +475,8 @@ stream_begin_entry :: proc (stream: ^Value, id: string, loc := #caller_location)
         parse_sequence = true
     }
     
+    id := id
     if parse_millis {
-        id := id
         milli_string, ok := chop(&id, "-")
         assert(ok)
         
@@ -476,30 +492,25 @@ stream_begin_entry :: proc (stream: ^Value, id: string, loc := #caller_location)
         sequence = cast(int) xx
     }
     
-    time_ok := true
-    milliseconds = (milliseconds / time.Millisecond) * time.Millisecond
-    if len(stream.entries) == 0 {
-        last := stream.entries[len(stream.entries)]
+    error := Id_Error.none
+    if len(stream.entries) > 0 {
+        last := stream.entries[len(stream.entries)-1]
         
-        if last.id_millis > milliseconds {
-            time_ok = false
+        if milliseconds < last.id_millis {
+            error = .id_too_smol
         }
         
-        if sequence != -1 {
-            if last.id_millis == milliseconds {
-                if last.id_sequence <= sequence {
-                    time_ok = false
+        if sequence == -1 {
+            sequence = last.id_sequence + 1
+        } else {
+            if milliseconds == last.id_millis {
+                if sequence <= last.id_sequence {
+                    error = .id_too_smol
                 }
             }
-        } else {
-            sequence = last.id_sequence + 1
         }
     } else {
-        if sequence != -1 {
-            if milliseconds == 0 && sequence < 1 {
-                time_ok = false
-            }
-        } else {
+        if sequence == -1 {
             if milliseconds == 0 {
                 sequence = 1
             } else {
@@ -508,11 +519,15 @@ stream_begin_entry :: proc (stream: ^Value, id: string, loc := #caller_location)
         }
     }
     
+    if milliseconds == 0 && sequence == 0 {
+        error = .bad_nil_value
+    }
+    
     assert(milliseconds != -1)
     assert(sequence != -1)
     
     result: ^Stream_Entry
-    if time_ok {
+    if error == .none {
         count := len(stream.entries)
         append_nothing(&stream.entries)
         result = &stream.entries[count]
@@ -521,7 +536,7 @@ stream_begin_entry :: proc (stream: ^Value, id: string, loc := #caller_location)
         result.kv_start = len(stream.entries_kv)
     }
     
-    return result, time_ok
+    return result, error
 }
 
 stream_add_item :: proc (stream: ^Value, entry: ^Stream_Entry, key, value: string, loc := #caller_location) {
