@@ -301,8 +301,7 @@ handle_client :: proc (task: thread.Task) {
             
             stream, _ := store_get(client.store, key, .Stream, or_insert = true)
             
-            id, ok := chop_bulk_string(client)
-            assert(ok)
+            id := expect_bulk_string(client, "missing id") or_break handle
             
             entry, entry_error := stream_begin_entry(stream, id)
             if entry_error != .none {
@@ -335,12 +334,8 @@ handle_client :: proc (task: thread.Task) {
                 break handle
             }
             
-            start_id, start_id_ok := chop_bulk_string(client)
-            stop_id,  stop_id_ok  := chop_bulk_string(client)
-            if !start_id_ok || !stop_id_ok {
-                write_simple_error(client, "ERR", "bad start stop")
-                break handle
-            }
+            start_id := expect_bulk_string(client, "bad start") or_break handle
+            stop_id  := expect_bulk_string(client, "bad stop")  or_break handle
             
             start, start_ok := parse_id_or_first_id(stream, start_id, 0)
             stop,  stop_ok  := parse_id_or_last_id(stream, stop_id, max(int))
@@ -370,9 +365,9 @@ handle_client :: proc (task: thread.Task) {
             }
             
         case "XREAD":
-            streams, streams_ok := chop_bulk_string(client)
-            if !streams_ok || streams != "streams" {
-                write_simple_error(client, "ERR", "missing 'streams'")
+            streams := expect_bulk_string(client, "missing 'streams'") or_break handle
+            if streams != "streams" {
+                write_simple_error(client, "ERR", "expected 'streams'")
                 break handle
             }
             
@@ -384,11 +379,7 @@ handle_client :: proc (task: thread.Task) {
                 break handle
             }
             
-            id_string, id_string_ok := chop_bulk_string(client)
-            if !id_string_ok {
-                write_simple_error(client, "ERR", "bad id")
-                break handle
-            }
+            id_string := expect_bulk_string(client) or_break handle
             
             start, start_ok := parse_id(id_string)
             if !start_ok {
@@ -422,7 +413,7 @@ handle_client :: proc (task: thread.Task) {
             zset, _ := store_get(client.store, key, .ZSet, or_insert = true)
             
             score := parse_float(client) or_break handle
-            value := chop_bulk_string(client) or_break handle
+            value := expect_bulk_string(client, "bad value") or_break handle
             
             added_count := zset_add(zset, score, value)
             write_simple_integer(client, added_count)
@@ -436,7 +427,7 @@ handle_client :: proc (task: thread.Task) {
                 break handle
             }
             
-            value := chop_bulk_string(client) or_break handle
+            value := expect_bulk_string(client, "bad value") or_break handle
             
             removed_count := zset_remove(zset, value)
             write_simple_integer(client, removed_count)
@@ -450,7 +441,7 @@ handle_client :: proc (task: thread.Task) {
                 break handle
             }
             
-            value := chop_bulk_string(client) or_break handle
+            value := expect_bulk_string(client, "bad value") or_break handle
             
             rank, ok := zset_rank(zset, value)
             if !ok {
@@ -468,7 +459,7 @@ handle_client :: proc (task: thread.Task) {
                 break handle
             }
             
-            value := chop_bulk_string(client) or_break handle
+            value := expect_bulk_string(client, "bad value") or_break handle
             
             score, ok := zset_score(zset, value)
             if !ok {
@@ -507,117 +498,6 @@ handle_client :: proc (task: thread.Task) {
         fmt.eprintf("sending response ```\n%v```", strings.to_string(client.response))
         send(client)
     }
-}
-
-////////////////////////////////////////////////
-
-zset_add :: proc (set: ^Value, score: f64, value: string, loc := #caller_location) -> int {
-    assert(set.kind == .ZSet, loc = loc)
-    
-    // @speed hash lookup
-    do_add := true
-    is_update := false
-    for it, it_index in set.items {
-        if it == value {
-            it_score := set.members_score[it_index]
-            if it_score < score {
-                do_add = false
-            } else {
-                is_update = true
-                // @copypasta
-                ordered_remove(&set.items,         it_index)
-                ordered_remove(&set.members_score, it_index)
-            }
-            break
-        }
-    }
-    
-    result: int
-    if do_add {
-        index := len(set.items)
-        search: for it_score, score_index in set.members_score {
-            if it_score == score {
-                it_content := set.items[score_index]
-                if value < it_content {
-                    index = score_index
-                } else {
-                    index = score_index+1
-                }
-                break search
-            }
-            
-            if it_score > score {
-                index = score_index
-                break search
-            }
-        }
-        
-        value_add_item(set, value, index)
-        inject_at(&set.members_score, index, score)
-        if !is_update {
-            result += 1
-        }
-    }
-    
-    return result
-}
-
-zset_rank :: proc (set: ^Value, value: string, loc := #caller_location) -> (int, bool) {
-    assert(set.kind == .ZSet, loc = loc)
-    
-    result: int
-    ok: bool
-    
-    search: for it, it_index in set.items {
-        if it == value {
-            result = it_index
-            ok = true
-            break search
-        }
-    }
-    
-    return result, ok
-}
-
-zset_score :: proc (set: ^Value, value: string, loc := #caller_location) -> (f64, bool) {
-    assert(set.kind == .ZSet, loc = loc)
-    
-    index, ok := zset_rank(set, value, loc)
-    result := set.members_score[index]
-    
-    return result, ok
-}
-
-zset_remove :: proc (set: ^Value, value: string, loc := #caller_location) -> int {
-    assert(set.kind == .ZSet, loc = loc)
-    
-    index, ok := zset_rank(set, value, loc)
-    result: int
-    if ok {
-        ordered_remove(&set.items,         index)
-        ordered_remove(&set.members_score, index)
-        result += 1
-    }
-    
-    return result
-}
-
-zset_card :: proc (set: ^Value, loc := #caller_location) -> int {
-    result: int
-    
-    if set != nil {
-        assert(set.kind == .ZSet, loc = loc)
-        result = len(set.items)
-    }
-    
-    return result
-}
-
-zset_slice :: proc (set: ^Value, start, stop: int, loc := #caller_location) -> [] string {
-    assert(set.kind == .ZSet, loc = loc)
-    
-    result := value_slice(set, start, stop)
-    return result
 }
 
 ////////////////////////////////////////////////
@@ -811,11 +691,8 @@ send :: proc (client: ^Client) {
 ////////////////////////////////////////////////
 
 parse_key :: proc (client: ^Client) -> (string, bool) {
-    key, key_ok := chop_bulk_string(client)
-    if !key_ok {
-        write_simple_error(client, "ERR", "missing key")
-    }
-    return key, key_ok
+    key, ok := expect_bulk_string(client, "missing key")
+    return key, ok
 }
 
 parse_id_or_first_id :: proc (stream: ^Value, id: string, default_sequence := -1) -> (Stream_Id, bool) {
