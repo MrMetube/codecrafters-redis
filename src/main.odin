@@ -203,11 +203,13 @@ handle_client :: proc (task: thread.Task) {
                 value_set(value, "0")
                 content = value_get(value)
             }
-             
+            
             number, ok := strconv.parse_int(content)
+            fmt.eprintf("content = `%v`, number = %v\n", content, number)
+            
             if ok {
                 number += 1
-                value_set(value, fmt.aprint(number, context.allocator))
+                value_set(value, fmt.aprintf("%v", number, allocator = context.allocator))
                 write_simple_integer(client, number)
             } else {
                 write_simple_error(client, "ERR", "value is not an integer or out of range")
@@ -574,11 +576,13 @@ value_slice :: proc (value: ^Value, start, stop: int) -> [] string {
     return result
 }
 
-value_set :: proc (value: ^Value, s: string, expiration := time.Time{}, loc := #caller_location) {
+value_set :: proc (value: ^Value, s: string, expiration := Maybe(time.Time){}, loc := #caller_location) {
     assert(value.kind == .String, loc = loc)
     
     value.content = s
-    value.expiration = expiration
+    if exp, ok := expiration.?; ok {
+        value.expiration = exp
+    }
 }
 
 value_get :: proc (value: ^Value, loc := #caller_location) -> string {
