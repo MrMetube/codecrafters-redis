@@ -357,7 +357,7 @@ handle_client :: proc (task: thread.Task) {
             }
             
             start, start_ok := parse_id_or_first_id(stream, start_id, 0)
-            stop,  stop_ok  := parse_id(stop_id, max(int))
+            stop,  stop_ok  := parse_id_or_last_id(stream, stop_id, max(int))
             if !start_ok || !stop_ok {
                 write_simple_error(client, "ERR", "bad id")
                 break handle
@@ -699,12 +699,29 @@ parse_key :: proc (client: ^Client) -> (string, bool) {
 
 parse_id_or_first_id :: proc (stream: ^Value, id: string, default_sequence := -1) -> (Stream_Id, bool) {
     assert(stream.kind == .Stream)
-
+    
     result: Stream_Id
     ok: bool
     if id == "-" {
         if len(stream.entries) > 0 {
             result = stream.entries[0].id
+            ok = true
+        }
+    } else {
+        result, ok = parse_id(id, default_sequence)
+    }
+    
+    return result, ok
+}
+
+parse_id_or_last_id :: proc (stream: ^Value, id: string, default_sequence := -1) -> (Stream_Id, bool) {
+    assert(stream.kind == .Stream)
+    
+    result: Stream_Id
+    ok: bool
+    if id == "+" {
+        if len(stream.entries) > 0 {
+            result = stream.entries[len(stream.entries)].id
             ok = true
         }
     } else {
