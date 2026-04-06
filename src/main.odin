@@ -320,17 +320,7 @@ handle_client :: proc (task: thread.Task) {
             assert(ok)
             
             entry, entry_error := stream_begin_entry(stream, id)
-            if entry_error == .none {
-                for {
-                    item_key   := expect_bulk_string(client, "bad entry key")   or_break handle
-                    item_value := expect_bulk_string(client, "bad entry value") or_break handle
-                    stream_add_item(stream, entry, item_key, item_value)
-                    if client.request == "" do break
-                }
-                stream_end_entry(stream, entry)
-                
-                write_sequence_id(client, entry.id)
-            } else {
+            if entry_error != .none {
                 message: string
                 switch entry_error {
                 case .none: unreachable()
@@ -338,7 +328,18 @@ handle_client :: proc (task: thread.Task) {
                 case .bad_nil_value: message = "The ID specified in XADD must be greater than 0-0"
                 }
                 write_simple_error(client, "ERR", message)
+                break handle
             }
+            
+            for {
+                item_key   := expect_bulk_string(client, "bad entry key")   or_break handle
+                item_value := expect_bulk_string(client, "bad entry value") or_break handle
+                stream_add_item(stream, entry, item_key, item_value)
+                if client.request == "" do break
+            }
+            stream_end_entry(stream, entry)
+            
+            write_sequence_id(client, entry.id)
             
         case "XRANGE":
             key := parse_key(client) or_break handle
@@ -379,16 +380,53 @@ handle_client :: proc (task: thread.Task) {
             
             entries := stream.entries[entry_start:entry_stop]
             write_array_len(client, len(entries))
-            for entry in entries {
-                write_array_len(client, 2)
-                write_sequence_id(client, entry.id)
-                
-                write_array_len(client, entry.kv_count*2)
-                for kv_index in entry.kv_start..<entry.kv_start+entry.kv_count {
-                    kv := stream.entries_kv[kv_index]
-                    write_bulk_string(client, kv.key)
-                    write_bulk_string(client, kv.value)
+            for &entry in entries {
+                write_stream_entry(client, stream, &entry)
+            }
+            
+        case "XREAD":
+            streams, streams_ok := chop_bulk_string(&client.request)
+            if !streams_ok || streams != "streams" {
+                write_simple_error(client, "ERR", "missing 'streams'")
+                break handle
+            }
+            
+            key := parse_key(client) or_break handle
+            
+            stream, stream_ok := store_get(client.store, key, .Stream)
+            if !stream_ok {
+                write_simple_error(client, "ERR", "unknown stream")
+                break handle
+            }
+            
+            id_string, id_string_ok := chop_bulk_string(&client.request)
+            if !id_string_ok {
+                write_simple_error(client, "ERR", "bad id")
+                break handle
+            }
+            
+            start, start_ok := parse_id(id_string)
+            if !start_ok {
+                write_simple_error(client, "ERR", "bad id")
+                break handle
+            }
+            
+            
+            entry_start := 0
+            find_read: for entry, entry_index in stream.entries {
+                if entry.id.millis > start.millis && entry.id.sequence > start.sequence {
+                    entry_start = entry_index
+                    break find_read
                 }
+            }
+            
+            entries := stream.entries[entry_start:]
+            write_array_len(client, 1)
+            write_array_len(client, 2)
+            write_bulk_string(client, key)
+            write_array_len(client, len(entries))
+            for &entry in entries {
+                write_stream_entry(client, stream, &entry)
             }
             
         case:
@@ -677,7 +715,20 @@ write_bulk_string :: proc (client: ^Client, data: string) {
 write_sequence_id :: proc (client: ^Client, id: Stream_Id) {
     write_bulk_string(client, fmt.tprintf("%v-%v", id.millis, id.sequence))
 }
+
+write_stream_entry :: proc (client: ^Client, stream: ^Value, entry: ^Stream_Entry) {
+    assert(stream.kind == .Stream)
     
+    write_array_len(client, 2)
+    write_sequence_id(client, entry.id)
+    
+    write_array_len(client, entry.kv_count*2)
+    for kv_index in entry.kv_start..<entry.kv_start+entry.kv_count {
+        kv := stream.entries_kv[kv_index]
+        write_bulk_string(client, kv.key)
+        write_bulk_string(client, kv.value)
+    }
+}
 
 ////////////////////////////////////////////////
 
