@@ -20,23 +20,23 @@ list_pop :: proc (list: ^Value, loc := #caller_location) -> string {
     return result
 }
 
-list_len :: proc (list: ^Value, loc := #caller_location) -> int {
-    result: int
-    
-    if list != nil {
-        assert(list.kind == .List, loc = loc)
-        result = len(list.items)
-    }
+////////////////////////////////////////////////
+
+list_len :: proc (list: Value, loc := #caller_location) -> int {
+    assert(list.kind == .List, loc = loc)
+    result := len(list.items)
     
     return result
 }
 
-list_slice :: proc (list: ^Value, start, stop: int, loc := #caller_location) -> [] string {
+list_slice :: proc (list: Value, start, stop: int, loc := #caller_location) -> [] string {
     assert(list.kind == .List, loc = loc)
     
     result := value_slice(list, start, stop)
     return result
 }
+
+////////////////////////////////////////////////
 
 list_block :: proc (list: ^Value, timeout := max(time.Duration), loc := #caller_location) -> bool {
     assert(list.kind == .List, loc = loc)

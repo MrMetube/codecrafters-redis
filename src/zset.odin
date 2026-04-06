@@ -45,7 +45,23 @@ zset_add :: proc (set: ^Value, score: f64, value: string, loc := #caller_locatio
     return result
 }
 
-zset_rank :: proc (set: ^Value, value: string, loc := #caller_location) -> (int, bool) {
+zset_remove :: proc (set: ^Value, value: string, loc := #caller_location) -> int {
+    assert(set.kind == .ZSet, loc = loc)
+    
+    index, ok := zset_rank(set^, value, loc)
+    result: int
+    if ok {
+        ordered_remove(&set.items,         index)
+        ordered_remove(&set.members_score, index)
+        result += 1
+    }
+    
+    return result
+}
+
+////////////////////////////////////////////////
+
+zset_rank :: proc (set: Value, value: string, loc := #caller_location) -> (int, bool) {
     assert(set.kind == .ZSet, loc = loc)
     
     result: int
@@ -62,7 +78,7 @@ zset_rank :: proc (set: ^Value, value: string, loc := #caller_location) -> (int,
     return result, ok
 }
 
-zset_score :: proc (set: ^Value, value: string, loc := #caller_location) -> (f64, bool) {
+zset_score :: proc (set: Value, value: string, loc := #caller_location) -> (f64, bool) {
     assert(set.kind == .ZSet, loc = loc)
     
     index, ok := zset_rank(set, value, loc)
@@ -71,32 +87,14 @@ zset_score :: proc (set: ^Value, value: string, loc := #caller_location) -> (f64
     return result, ok
 }
 
-zset_remove :: proc (set: ^Value, value: string, loc := #caller_location) -> int {
+zset_card :: proc (set: Value, loc := #caller_location) -> int {
     assert(set.kind == .ZSet, loc = loc)
     
-    index, ok := zset_rank(set, value, loc)
-    result: int
-    if ok {
-        ordered_remove(&set.items,         index)
-        ordered_remove(&set.members_score, index)
-        result += 1
-    }
-    
+    result := len(set.items)
     return result
 }
 
-zset_card :: proc (set: ^Value, loc := #caller_location) -> int {
-    result: int
-    
-    if set != nil {
-        assert(set.kind == .ZSet, loc = loc)
-        result = len(set.items)
-    }
-    
-    return result
-}
-
-zset_slice :: proc (set: ^Value, start, stop: int, loc := #caller_location) -> [] string {
+zset_slice :: proc (set: Value, start, stop: int, loc := #caller_location) -> [] string {
     assert(set.kind == .ZSet, loc = loc)
     
     result := value_slice(set, start, stop)

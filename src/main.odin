@@ -249,7 +249,7 @@ handle_client :: proc (task: thread.Task) {
         case "RPUSH":
             key := parse_key(client) or_break handle
             
-            list, list_ok := store_get(client.store, key, .List, or_insert = true)
+            list, _ := store_get(client.store, key, .List, or_insert = true)
             
             for client.request != "" {
                 value := expect_bulk_string(client, "bad value") or_break handle
@@ -257,12 +257,12 @@ handle_client :: proc (task: thread.Task) {
                 list_append(list, value)
             }
             
-            write_simple_integer(client, list_len(list))
+            write_simple_integer(client, list_len(list^))
             
         case "LPUSH":
             key := parse_key(client) or_break handle
             
-            list, list_ok := store_get(client.store, key, .List, or_insert = true)
+            list, _ := store_get(client.store, key, .List, or_insert = true)
             
             for client.request != "" {
                 value := expect_bulk_string(client, "bad value") or_break handle
@@ -271,13 +271,17 @@ handle_client :: proc (task: thread.Task) {
                 list_prepend(list, value)
             }
             
-            write_simple_integer(client, list_len(list))
+            write_simple_integer(client, list_len(list^))
             
         case "LLEN":
             key := parse_key(client) or_break handle
             
-            list, _ := store_get(client.store, key, .List)
-            write_simple_integer(client, list_len(list))
+            list, ok := store_get(client.store, key, .List)
+            count: int
+            if ok {
+                count = list_len(list^)
+            }
+            write_simple_integer(client, count)
             
         case "LRANGE":
             key := parse_key(client) or_break handle
@@ -291,7 +295,7 @@ handle_client :: proc (task: thread.Task) {
                 break handle
             }
             
-            slice := list_slice(list, start, stop)
+            slice := list_slice(list^, start, stop)
             write_array_of_bulk_string(client, slice)
             
         case "LPOP":
@@ -303,19 +307,20 @@ handle_client :: proc (task: thread.Task) {
             }
             
             list, list_ok := store_get(client.store, key, .List)
-            if list_len(list) == 0 {
+            if list_ok && list_len(list^) == 0 {
                 list_ok = false
             }
             
+            if !list_ok {
+                write_bulk_string_nil(client)
+                break handle
+            }
+            
             if count == 1 {
-                if list_ok {
-                    popped := list_pop(list)
-                    write_bulk_string(client, popped)
-                } else {
-                    write_bulk_string_nil(client)
-                }
+                popped := list_pop(list)
+                write_bulk_string(client, popped)
             } else {
-                slice := list_slice(list, 0, count-1)
+                slice := list_slice(list^, 0, count-1)
                 write_array_of_bulk_string(client, slice)
                 // @cleanup
                 for _ in 0..<count do list_pop(list)
@@ -488,7 +493,7 @@ handle_client :: proc (task: thread.Task) {
         case "ZRANK":
             key := parse_key(client) or_break handle
             
-            zset, zset_ok := store_get(client.store, key, .ZSet)
+            zset, zset_ok := store_get_readonly(client.store, key, .ZSet)
             if !zset_ok {
                 write_bulk_string_nil(client)
                 break handle
@@ -506,7 +511,7 @@ handle_client :: proc (task: thread.Task) {
         case "ZSCORE":
             key := parse_key(client) or_break handle
             
-            zset, zset_ok := store_get(client.store, key, .ZSet)
+            zset, zset_ok := store_get_readonly(client.store, key, .ZSet)
             if !zset_ok {
                 write_bulk_string_nil(client)
                 break handle
@@ -527,7 +532,7 @@ handle_client :: proc (task: thread.Task) {
             start := parse_integer(client) or_break handle
             stop  := parse_integer(client) or_break handle
             
-            zset, zset_ok := store_get(client.store, key, .ZSet)
+            zset, zset_ok := store_get_readonly(client.store, key, .ZSet)
             if !zset_ok {
                 write_array_len(client, 0)
                 break handle
@@ -539,8 +544,12 @@ handle_client :: proc (task: thread.Task) {
         case "ZCARD":
             key := parse_key(client) or_break handle
             
-            zset, _ := store_get(client.store, key, .ZSet)
-            write_simple_integer(client, zset_card(zset))
+            zset, ok := store_get_readonly(client.store, key, .ZSet)
+            cardinality: int
+            if ok {
+                cardinality = zset_card(zset)
+            }
+            write_simple_integer(client, cardinality)
             
         ////////////////////////////////////////////////
             
@@ -608,37 +617,35 @@ value_add_item :: proc (value: ^Value, s: string, index: int) {
     sync.sema_post(&value.items_semaphore, 1)
 }
 
-value_slice :: proc (value: ^Value, start, stop: int) -> [] string {
+value_slice :: proc (value: Value, start, stop: int) -> [] string {
     start, stop := start, stop
     
-    list_ok := value != nil
-    if list_ok {
-        count := len(value.items)
-        if start < 0 {
-            if start < -count {
-                start = 0 
-            } else {
-                start = ((start % count) + count) % count
-            }
+    count := len(value.items)
+    if start < 0 {
+        if start < -count {
+            start = 0 
+        } else {
+            start = ((start % count) + count) % count
         }
-        
-        if stop < 0 {
-            stop = ((stop % count) + count) % count
-        } else if stop > count {
-            stop = count-1
-        }
-    }
-        
-    if start > stop {
-        list_ok = false
     }
     
-    if list_ok && start >= len(value.items) {
-        list_ok = false
+    if stop < 0 {
+        stop = ((stop % count) + count) % count
+    } else if stop > count {
+        stop = count-1
+    }
+        
+    ok := true
+    if start > stop {
+        ok = false
+    }
+    
+    if ok && start >= count {
+        ok = false
     }
     
     result: [] string
-    if list_ok {
+    if ok {
         result = value.items[start:stop+1]
     }
     return result
@@ -672,6 +679,15 @@ store_type :: proc (store: ^Store, key: string) -> Value_Kind {
         result = value.kind
     }
     return result
+}
+
+store_get_readonly :: proc (store: ^Store, key: string, kind: Value_Kind, or_insert := false, replace_previous := false) -> (Value, bool) {
+    value, ok := store_get(store, key, kind, or_insert, replace_previous)
+    result: Value
+    if ok {
+        result = value^
+    }
+    return result, ok
 }
 
 store_get :: proc (store: ^Store, key: string, kind: Value_Kind, or_insert := false, replace_previous := false) -> (^Value, bool) {
