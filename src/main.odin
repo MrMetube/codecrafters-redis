@@ -200,7 +200,7 @@ handle_client :: proc (task: thread.Task) {
             
             content := value_get(value)
             if content == "" {
-                value_set(value, "1")
+                value_set(value, "0")
                 content = value_get(value)
             }
              
